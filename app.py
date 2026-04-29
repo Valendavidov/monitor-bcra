@@ -37,9 +37,8 @@ def fetch_serie(id_variable, desde, hasta):
             return df
     return pd.DataFrame()
 
-def fetch_ultimo_valor(id_variable, hasta):
-    desde = (pd.Timestamp(hasta) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
-    df = fetch_serie(id_variable, desde, hasta)
+def fetch_ultimo_valor(id_variable, fecha):
+    df = fetch_serie(id_variable, fecha, fecha)
     if not df.empty:
         ultima = df.iloc[-1]
         return ultima["valor"], ultima["fecha"].strftime("%Y-%m-%d")
