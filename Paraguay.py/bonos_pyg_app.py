@@ -67,6 +67,22 @@ DEC = 3  # cantidad de decimales que se muestran en TODA la app (precios, yields
 # cambiar la fecha cada vez que abre la app.
 SETTLEMENT_DEFAULT = date.today() + timedelta(days=1)
 
+
+def fmt_es(x: float, decimales: int = DEC) -> str:
+    """Formatea un numero al estilo español/latinoamericano: punto como
+    separador de miles, coma como separador decimal (ej. 1.234.567,891).
+
+    Python solo sabe formatear al reves (coma miles, punto decimal), asi
+    que se arma con el formato "de siempre" y despues se intercambian los
+    dos simbolos. Se usa en todo texto que dibujamos nosotros mismos
+    (metricas, la grilla de YAS, la conversion de moneda). Los inputs
+    numericos (st.number_input) y las columnas EDITABLES de las tablas se
+    dejan con punto decimal de fabrica, porque cambiarles el formato ahi
+    podria romper la edicion (el navegador espera tipear con punto).
+    """
+    texto = f"{x:,.{decimales}f}"
+    return texto.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+
 # Un diccionario por pais con todo lo que cambia entre uno y otro: de que
 # archivo CSV sale el universo de bonos, y la paleta de colores (basada en
 # la bandera de cada pais) que se usa en el CSS de mas abajo.
@@ -277,17 +293,21 @@ with tab_cashflow:
     c1, c2, c3 = st.columns(3)
     c1.metric("Cupón anterior", prev_coupon.strftime("%Y-%m-%d"))
     c2.metric("Próximo cupón", next_coupon.strftime("%Y-%m-%d"))
-    c3.metric("Interés corrido", f"{accrued:.{DEC}f}")
+    c3.metric("Interés corrido", fmt_es(accrued))
 
     st.subheader("Cashflows futuros")
     cf = bond_cf.cashflows(settlement_cf)
     # .rename(columns=str.upper): a diferencia de las tablas EDITABLES de
     # mas abajo, esta es de solo lectura (st.dataframe), asi que alcanza
-    # con renombrar las columnas del propio DataFrame a mayuscula.
-    st.dataframe(cf.rename(columns=str.upper), use_container_width=True, hide_index=True)
+    # con renombrar las columnas del propio DataFrame a mayuscula y
+    # pre-formatear los numeros a mano (punto de miles, coma decimal).
+    cf_display = cf.copy()
+    for col in ["periodos_semestrales", "cupon", "principal", "flujo_total"]:
+        cf_display[col] = cf_display[col].map(fmt_es)
+    st.dataframe(cf_display.rename(columns=str.upper), use_container_width=True, hide_index=True)
     st.download_button(
         "Descargar cashflows (CSV)",
-        cf.to_csv(index=False).encode("utf-8"),
+        cf.to_csv(index=False).encode("utf-8"),  # el CSV exportado queda con numeros "de siempre"
         file_name=f"cashflows_{nombre_cf.replace(' ', '_')}.csv",
         mime="text/csv",
     )
@@ -341,23 +361,23 @@ with tab_yas:
         g1, g2 = st.columns(2)
         with g1:
             st.markdown('<div class="yas-label">YIELD (YTM %)</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["ytm_pct"]:.{DEC}f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["ytm_pct"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">PRECIO LIMPIO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["precio_limpio"]:.{DEC}f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["precio_limpio"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">PRECIO SUCIO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["precio_sucio"]:.{DEC}f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["precio_sucio"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">INTERÉS CORRIDO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["interes_corrido"]:.{DEC}f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["interes_corrido"])}</div>', unsafe_allow_html=True)
             paridad_val = bond.paridad(summary["precio_limpio"], settlement)
             st.markdown('<div class="yas-label">PARIDAD</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{paridad_val:.{DEC}f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(paridad_val)}</div>', unsafe_allow_html=True)
         with g2:
             st.markdown('<div class="yas-label">DURACIÓN MACAULAY (AÑOS)</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["duracion_macaulay_anios"]:.{DEC}f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["duracion_macaulay_anios"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">DURACIÓN MODIFICADA</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["duracion_modificada"]:.{DEC}f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["duracion_modificada"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">CONVEXIDAD</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["convexidad"]:.{DEC}f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["convexidad"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">SETTLEMENT</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{summary["settlement"]}</div>', unsafe_allow_html=True)
 
@@ -408,7 +428,7 @@ with tab_yas:
             nominales = usd_consideracion / (summary["precio_sucio"] / 100)
 
     def _valor_o_guion(v):
-        return f"{v:,.{DEC}f}" if v is not None else "—"
+        return fmt_es(v) if v is not None else "—"
 
     g_fx1, g_fx2, g_fx3 = st.columns(3)
     with g_fx1:
@@ -494,6 +514,12 @@ with tab_monitor:
         px_mid = (px_bid + px_offer) / 2
         s_mid = b.summary(mesa_settlement, clean_price=px_mid)
 
+        # yield_bid/offer y px_bid/offer quedan como numeros (uno de los
+        # dos pares es editable segun el modo, y las columnas editables
+        # necesitan seguir siendo NumberColumn). Los campos que SIEMPRE
+        # son de solo lectura (spread, cupon, duration, paridad) se
+        # pre-formatean a texto en estilo español (punto miles, coma
+        # decimal), porque esos si podemos controlarlos por completo.
         tabla_rows.append({
             "nombre": n,
             "isin": row.get("isin", ""),
@@ -502,11 +528,11 @@ with tab_monitor:
             "yield_offer": round(yield_offer, DEC),
             "px_bid": round(px_bid, DEC),
             "px_offer": round(px_offer, DEC),
-            "spread_bid_offer_bps": round((yield_bid - yield_offer) * 100, DEC),  # *100: de % a bps
+            "spread_bid_offer_bps": fmt_es((yield_bid - yield_offer) * 100),  # *100: de % a bps
             "maturity": row["maturity"],
-            "cupon_pct": row["coupon_pct"],
-            "duracion_modificada": round(s_mid["duracion_modificada"], DEC),
-            "paridad": round(b.paridad(px_mid, mesa_settlement), DEC),
+            "cupon_pct": fmt_es(row["coupon_pct"]),
+            "duracion_modificada": fmt_es(s_mid["duracion_modificada"]),
+            "paridad": fmt_es(b.paridad(px_mid, mesa_settlement)),
         })
     tabla_df = pd.DataFrame(tabla_rows)
 
@@ -531,15 +557,21 @@ with tab_monitor:
             "nombre": st.column_config.TextColumn("NOMBRE"),
             "isin": st.column_config.TextColumn("ISIN"),
             "codigo": st.column_config.TextColumn("CÓDIGO"),
-            "yield_bid": st.column_config.NumberColumn("YIELD BID %", format=f"%.{DEC}f"),
-            "yield_offer": st.column_config.NumberColumn("YIELD OFFER %", format=f"%.{DEC}f"),
-            "px_bid": st.column_config.NumberColumn("PX BID", format=f"%.{DEC}f"),
-            "px_offer": st.column_config.NumberColumn("PX OFFER", format=f"%.{DEC}f"),
-            "spread_bid_offer_bps": st.column_config.NumberColumn("SPREAD B/O (BPS)", format=f"%.{DEC}f"),
+            # yield_bid/offer y px_bid/offer son las columnas EDITABLES (una
+            # de las dos parejas segun el modo), asi que se quedan como
+            # numeros de verdad. "localized" le pide al navegador que las
+            # muestre con el formato numerico de su propio idioma.
+            "yield_bid": st.column_config.NumberColumn("YIELD BID %", format="localized"),
+            "yield_offer": st.column_config.NumberColumn("YIELD OFFER %", format="localized"),
+            "px_bid": st.column_config.NumberColumn("PX BID", format="localized"),
+            "px_offer": st.column_config.NumberColumn("PX OFFER", format="localized"),
+            # Estas cuatro son siempre de solo lectura: ya llegan pre-formateadas
+            # como texto (fmt_es), asi que van como TextColumn.
+            "spread_bid_offer_bps": st.column_config.TextColumn("SPREAD B/O (BPS)"),
             "maturity": st.column_config.DateColumn("VENCIMIENTO"),
-            "cupon_pct": st.column_config.NumberColumn("CUPÓN %", format=f"%.{DEC}f"),
-            "duracion_modificada": st.column_config.NumberColumn("MOD. DURATION", format=f"%.{DEC}f"),
-            "paridad": st.column_config.NumberColumn("PARIDAD", format=f"%.{DEC}f"),
+            "cupon_pct": st.column_config.TextColumn("CUPÓN %"),
+            "duracion_modificada": st.column_config.TextColumn("MOD. DURATION"),
+            "paridad": st.column_config.TextColumn("PARIDAD"),
         },
         key=f"tabla_editor_{pais}_{modo_mesa}",
     )
