@@ -21,33 +21,60 @@ from bond_model import Bond
 
 REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "bonos_universo.csv")
 
-st.set_page_config(page_title="Bonos Paraguay | Terminal", layout="wide", page_icon="🟠")
+st.set_page_config(page_title="Bonos Paraguay", layout="wide")
 
-# ── Identidad visual propia (terminal-style, distinta del monitor BCRA) ──────
+# ── Identidad visual propia: paleta bandera Paraguay (azul / blanco / rojo) ──
+PY_BLUE = "#0038A8"
+PY_RED = "#D52B1E"
+PY_WHITE = "#F5F6F7"
+
 st.markdown(
-    """
+    f"""
     <style>
-    .stApp { background-color: #0B0B0C; }
-    html, body, [class*="css"] { font-family: "IBM Plex Mono", "Courier New", monospace; }
-    h1, h2, h3 { color: #FFA640 !important; letter-spacing: 0.5px; }
-    [data-testid="stMetricValue"] { color: #FFA640; font-family: "IBM Plex Mono", monospace; }
-    [data-testid="stMetricLabel"] { color: #9A9A9A; }
-    .stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid #2A2A2A; }
-    .stTabs [data-baseweb="tab"] {
-        background-color: #161616; color: #C9C9C9; border-radius: 4px 4px 0 0;
-        padding: 8px 18px;
-    }
-    .stTabs [aria-selected="true"] { background-color: #1F1400; color: #FFA640 !important; }
-    div[data-testid="stDataFrame"] { border: 1px solid #2A2A2A; }
-    .yas-label { color: #9A9A9A; font-size: 0.85rem; }
-    .yas-value { color: #FFA640; font-size: 1.4rem; font-weight: 600; }
+    .stApp {{ background-color: #0E1116; }}
+    html, body, [class*="css"] {{
+        font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    }}
+    h1, h2, h3 {{ color: {PY_WHITE} !important; font-weight: 600; letter-spacing: 0.2px; }}
+    .py-flagbar {{
+        display: flex; height: 5px; width: 100%; margin: 4px 0 20px 0; border-radius: 2px;
+        overflow: hidden;
+    }}
+    .py-flagbar span {{ flex: 1; }}
+    [data-testid="stMetricValue"] {{
+        color: {PY_BLUE}; font-family: "Roboto Mono", Consolas, monospace; font-weight: 600;
+    }}
+    [data-testid="stMetricLabel"] {{ color: #8A8F98; }}
+    .stTabs [data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 1px solid #262B33; }}
+    .stTabs [data-baseweb="tab"] {{
+        background-color: #171B21; color: #B8BCC4; border-radius: 4px 4px 0 0;
+        padding: 8px 20px;
+    }}
+    .stTabs [aria-selected="true"] {{
+        background-color: #16233F; color: {PY_WHITE} !important;
+        border-bottom: 2px solid {PY_BLUE};
+    }}
+    div[data-testid="stDataFrame"] {{ border: 1px solid #262B33; border-radius: 4px; }}
+    .yas-label {{ color: #8A8F98; font-size: 0.8rem; letter-spacing: 0.4px; text-transform: uppercase; }}
+    .yas-value {{
+        color: {PY_BLUE}; font-size: 1.5rem; font-weight: 700;
+        font-family: "Roboto Mono", Consolas, monospace; margin-bottom: 0.6rem;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("🟠 Bonos Paraguay — Terminal")
-st.caption("Bonos bullet, cupon fijo semestral, convencion de dias 30/360")
+st.title("Bonos Paraguay")
+st.markdown(
+    f'<div class="py-flagbar">'
+    f'<span style="background:{PY_BLUE}"></span>'
+    f'<span style="background:{PY_WHITE}"></span>'
+    f'<span style="background:{PY_RED}"></span>'
+    f"</div>",
+    unsafe_allow_html=True,
+)
+st.caption("Bonos bullet, cupón fijo semestral, convención de días 30/360")
 
 
 # ── Universo de bonos (editable, persistido en CSV) ─────────────────────────
@@ -81,7 +108,7 @@ if registry.empty:
     st.warning("El universo de bonos esta vacio. Anda a la tab 'Monitor de bonos' para cargar uno.")
     st.stop()
 
-tab_cashflow, tab_yas, tab_monitor = st.tabs(["📄 Cashflows", "⚡ Valoración (YAS)", "🖥️ Monitor de bonos"])
+tab_cashflow, tab_yas, tab_monitor = st.tabs(["Cashflows", "Valoración (YAS)", "Monitor de bonos"])
 
 
 # ── Tab 1: Cashflows ─────────────────────────────────────────────────────────
@@ -165,21 +192,21 @@ with tab_yas:
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=[v / 100 for v in yields], y=prices, mode="lines",
-        name="Precio limpio", line=dict(color="#FFA640", width=2),
+        name="Precio limpio", line=dict(color=PY_BLUE, width=2),
     ))
     fig.add_trace(go.Scatter(
         x=[summary["ytm_pct"]], y=[summary["precio_limpio"]],
-        mode="markers", marker=dict(size=10, color="#FF4C4C"), name="Punto actual",
+        mode="markers", marker=dict(size=10, color=PY_RED), name="Punto actual",
     ))
     fig.update_layout(
         xaxis_title="YTM %", yaxis_title="Precio limpio",
         hovermode="x unified", height=380, margin=dict(l=0, r=0, t=20, b=0),
-        paper_bgcolor="#0B0B0C", plot_bgcolor="#0B0B0C",
-        font=dict(color="#C9C9C9"),
+        paper_bgcolor="#0E1116", plot_bgcolor="#0E1116",
+        font=dict(color="#C9CDD4"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
-    fig.update_xaxes(gridcolor="#2A2A2A")
-    fig.update_yaxes(gridcolor="#2A2A2A")
+    fig.update_xaxes(gridcolor="#262B33")
+    fig.update_yaxes(gridcolor="#262B33")
     st.plotly_chart(fig, use_container_width=True)
 
 
