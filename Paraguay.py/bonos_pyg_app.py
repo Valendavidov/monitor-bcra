@@ -195,7 +195,7 @@ st.markdown(
     '<div class="flagbar">' + "".join(f'<span style="background:{c}"></span>' for c in cfg["flag"]) + "</div>",
     unsafe_allow_html=True,
 )
-st.caption("Bonos bullet, cupón fijo semestral, convención de días 30/360")
+st.caption("Bonos bullet, cupón fijo semestral, convención de días Actual/360")
 
 REGISTRY_PATH = cfg["registry"]
 
