@@ -259,7 +259,7 @@ with tab_monitor:
 
     st.divider()
     st.subheader("Comparación rápida")
-    st.caption("Editá precio o yield (bid/offer) de todo el universo junto y mirá el resto de los campos calculados.")
+    st.caption("Editá precio o yield (bid/offer) directo en la tabla y mirá el resto de los campos calculados.")
 
     monitor_universe = filtrar_por_categoria(edited, key="cat_monitor")
 
@@ -282,47 +282,68 @@ with tab_monitor:
     with col_settle:
         mesa_settlement = st.date_input("Settlement (comparación)", value=date.today(), key="mesa_settlement")
 
-    mesa_rows = []
+    tabla_rows = []
     for _, row in monitor_universe.iterrows():
         n = row["nombre"]
-        mesa_rows.append({
+        bono_row = edited[edited["nombre"] == n].iloc[0]
+        b = make_bond(bono_row)
+
+        px_bid = st.session_state[px_bid_key][n]
+        px_offer = st.session_state[px_offer_key][n]
+        yield_bid = st.session_state[yld_bid_key][n]
+        yield_offer = st.session_state[yld_offer_key][n]
+
+        px_mid = (px_bid + px_offer) / 2
+        s_mid = b.summary(mesa_settlement, clean_price=px_mid)
+
+        tabla_rows.append({
             "nombre": n,
             "isin": row.get("isin", ""),
             "codigo": row.get("codigo", ""),
-            "coupon_pct": row["coupon_pct"],
+            "yield_bid": round(yield_bid, 4),
+            "yield_offer": round(yield_offer, 4),
+            "px_bid": round(px_bid, 4),
+            "px_offer": round(px_offer, 4),
+            "spread_bid_offer_bps": round((yield_bid - yield_offer) * 100, 2),
             "maturity": row["maturity"],
-            "px_bid": st.session_state[px_bid_key][n],
-            "px_offer": st.session_state[px_offer_key][n],
-            "yield_bid": st.session_state[yld_bid_key][n],
-            "yield_offer": st.session_state[yld_offer_key][n],
+            "cupon_pct": row["coupon_pct"],
+            "duracion_modificada": round(s_mid["duracion_modificada"], 4),
+            "paridad": round(b.paridad(px_mid, mesa_settlement), 4),
         })
-    mesa_df = pd.DataFrame(mesa_rows)
+    tabla_df = pd.DataFrame(tabla_rows)
 
-    campos_identificacion = ["nombre", "isin", "codigo", "coupon_pct", "maturity"]
+    columnas_orden = ["nombre", "isin", "codigo", "yield_bid", "yield_offer", "px_bid", "px_offer",
+                      "spread_bid_offer_bps", "maturity", "cupon_pct", "duracion_modificada", "paridad"]
+    campos_fijos = ["nombre", "isin", "codigo", "spread_bid_offer_bps", "maturity", "cupon_pct",
+                    "duracion_modificada", "paridad"]
     if modo_mesa == "Precio":
-        columnas_visibles = campos_identificacion + ["px_bid", "px_offer"]
-        disabled_cols = campos_identificacion
+        disabled_cols = campos_fijos + ["yield_bid", "yield_offer"]
     else:
-        columnas_visibles = campos_identificacion + ["yield_bid", "yield_offer"]
-        disabled_cols = campos_identificacion
+        disabled_cols = campos_fijos + ["px_bid", "px_offer"]
 
-    mesa_edited = st.data_editor(
-        mesa_df[columnas_visibles],
+    tabla_edited = st.data_editor(
+        tabla_df[columnas_orden],
         use_container_width=True,
         hide_index=True,
         disabled=disabled_cols,
         column_config={
-            "coupon_pct": st.column_config.NumberColumn("Cupón %", format="%.3f"),
-            "px_bid": st.column_config.NumberColumn("Px Bid", format="%.4f"),
-            "px_offer": st.column_config.NumberColumn("Px Offer", format="%.4f"),
+            "nombre": st.column_config.TextColumn("Nombre"),
+            "isin": st.column_config.TextColumn("ISIN"),
+            "codigo": st.column_config.TextColumn("Código"),
             "yield_bid": st.column_config.NumberColumn("Yield Bid %", format="%.4f"),
             "yield_offer": st.column_config.NumberColumn("Yield Offer %", format="%.4f"),
+            "px_bid": st.column_config.NumberColumn("Px Bid", format="%.4f"),
+            "px_offer": st.column_config.NumberColumn("Px Offer", format="%.4f"),
+            "spread_bid_offer_bps": st.column_config.NumberColumn("Spread B/O (bps)", format="%.2f"),
+            "maturity": st.column_config.DateColumn("Vencimiento"),
+            "cupon_pct": st.column_config.NumberColumn("Cupón %", format="%.3f"),
+            "duracion_modificada": st.column_config.NumberColumn("Mod. Duration", format="%.4f"),
+            "paridad": st.column_config.NumberColumn("Paridad", format="%.4f"),
         },
-        key=f"mesa_editor_{pais}_{modo_mesa}",
+        key=f"tabla_editor_{pais}_{modo_mesa}",
     )
 
-    resultados = []
-    for _, row in mesa_edited.iterrows():
+    for _, row in tabla_edited.iterrows():
         n = row["nombre"]
         bono_row = edited[edited["nombre"] == n].iloc[0]
         b = make_bond(bono_row)
@@ -342,24 +363,3 @@ with tab_monitor:
         st.session_state[px_offer_key][n] = px_offer
         st.session_state[yld_bid_key][n] = yield_bid
         st.session_state[yld_offer_key][n] = yield_offer
-
-        px_mid = (px_bid + px_offer) / 2
-        s_mid = b.summary(mesa_settlement, clean_price=px_mid)
-        paridad = b.paridad(px_mid, mesa_settlement)
-
-        resultados.append({
-            "nombre": n,
-            "isin": bono_row.get("isin", ""),
-            "codigo": bono_row.get("codigo", ""),
-            "yield_bid": round(yield_bid, 4),
-            "yield_offer": round(yield_offer, 4),
-            "px_bid": round(px_bid, 4),
-            "px_offer": round(px_offer, 4),
-            "spread_bid_offer_bps": round((yield_bid - yield_offer) * 100, 2),
-            "maturity": bono_row["maturity"],
-            "cupon_pct": bono_row["coupon_pct"],
-            "duracion_modificada": round(s_mid["duracion_modificada"], 4),
-            "paridad": round(paridad, 4),
-        })
-
-    st.dataframe(pd.DataFrame(resultados).rename(columns=str.upper), use_container_width=True, hide_index=True)
