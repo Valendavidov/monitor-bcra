@@ -30,6 +30,7 @@ Uso:
     streamlit run bonos_pyg_app.py
 """
 
+import json
 import os
 import sys
 from datetime import date, timedelta
@@ -46,6 +47,13 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from bond_model import Bond
+
+# Aca se guarda, por bono, el ultimo yield que el usuario tipeo en la tab
+# YAS - asi la proxima vez que abre la app aparece ese valor en vez de
+# siempre 6.5. (Nota: en Streamlit Cloud esto vive en el filesystem del
+# contenedor: sobrevive mientras la app siga "despierta", pero se resetea
+# si la nube reinicia/redeploya la app, porque ese archivo no se sube a git).
+LAST_YIELDS_PATH = os.path.join(BASE_DIR, "yas_ultimos_yields.json")
 
 
 # =============================================================================
@@ -179,6 +187,33 @@ def load_registry() -> pd.DataFrame:
     return df
 
 
+def cargar_ultimo_yield(nombre_bono: str, default: float = 6.5) -> float:
+    """Devuelve el ultimo yield guardado para ese bono, o `default` si
+    todavia nunca se tipeo nada para el."""
+    if not os.path.exists(LAST_YIELDS_PATH):
+        return default
+    try:
+        with open(LAST_YIELDS_PATH, "r") as f:
+            data = json.load(f)
+        return float(data.get(nombre_bono, default))
+    except (json.JSONDecodeError, ValueError):
+        return default
+
+
+def guardar_ultimo_yield(nombre_bono: str, ytm_pct: float) -> None:
+    """Actualiza el yield guardado para ese bono (y deja el resto igual)."""
+    data = {}
+    if os.path.exists(LAST_YIELDS_PATH):
+        try:
+            with open(LAST_YIELDS_PATH, "r") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            data = {}
+    data[nombre_bono] = ytm_pct
+    with open(LAST_YIELDS_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+
 def make_bond(row: pd.Series) -> Bond:
     """Convierte una fila del universo (del CSV o de una tabla editada) en
     un objeto Bond de bond_model.py, listo para pedirle precio/yield/etc."""
@@ -286,7 +321,16 @@ with tab_yas:
             bond = make_bond(row_sel)
             summary = bond.summary(settlement, clean_price=clean_price_in)
         else:
-            ytm_in = st.number_input("Yield (YTM %)", value=6.5, step=0.1, format=f"%.{DEC}f", key="yas_ytm")
+            # El yield que se muestra por defecto es el ultimo que se
+            # tipeo para ESTE bono (guardado en yas_ultimos_yields.json),
+            # no un 6.5 fijo. Cada vez que se tipea uno nuevo, se
+            # actualiza el archivo y queda como default de aca en mas.
+            ytm_default = cargar_ultimo_yield(nombre_sel)
+            ytm_in = st.number_input(
+                "Yield (YTM %)", value=ytm_default, step=0.1, format=f"%.{DEC}f",
+                key=f"yas_ytm_{nombre_sel}",
+            )
+            guardar_ultimo_yield(nombre_sel, ytm_in)
             bond = make_bond(row_sel)
             summary = bond.summary(settlement, ytm_pct=ytm_in)
 
