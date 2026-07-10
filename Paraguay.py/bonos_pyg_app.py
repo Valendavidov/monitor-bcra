@@ -235,6 +235,7 @@ with tab_monitor:
         column_config={
             "nombre": st.column_config.TextColumn("Nombre", required=True),
             "isin": st.column_config.TextColumn("ISIN"),
+            "codigo": st.column_config.TextColumn("Código"),
             "categoria": st.column_config.TextColumn("Categoría"),
             "coupon_pct": st.column_config.NumberColumn("Cupón %", format="%.3f", required=True),
             "maturity": st.column_config.DateColumn("Vencimiento", required=True),
@@ -255,54 +256,107 @@ with tab_monitor:
 
     st.divider()
     st.subheader("Comparación rápida")
-    st.caption("Cargá un precio limpio por bono y mirá yield/duration de todo el universo junto.")
+    st.caption("Editá precio o yield (bid/offer) de todo el universo junto y mirá el resto de los campos calculados.")
 
-    session_key = f"mesa_precios_{pais}"
-    if session_key not in st.session_state:
-        st.session_state[session_key] = {n: 100.0 for n in edited["nombre"]}
-    for n in edited["nombre"]:
-        st.session_state[session_key].setdefault(n, 100.0)
+    monitor_universe = filtrar_por_categoria(edited, key="cat_monitor")
 
-    mesa_settlement = st.date_input("Settlement (comparación)", value=date.today(), key="mesa_settlement")
+    px_bid_key = f"mesa_px_bid_{pais}"
+    px_offer_key = f"mesa_px_offer_{pais}"
+    yld_bid_key = f"mesa_yield_bid_{pais}"
+    yld_offer_key = f"mesa_yield_offer_{pais}"
+    for k in (px_bid_key, px_offer_key, yld_bid_key, yld_offer_key):
+        st.session_state.setdefault(k, {})
+
+    for n in monitor_universe["nombre"]:
+        st.session_state[px_bid_key].setdefault(n, 99.50)
+        st.session_state[px_offer_key].setdefault(n, 100.50)
+        st.session_state[yld_bid_key].setdefault(n, 6.50)
+        st.session_state[yld_offer_key].setdefault(n, 6.30)
+
+    col_modo, col_settle = st.columns([1, 1])
+    with col_modo:
+        modo_mesa = st.radio("Ingresar por", ["Precio", "Yield"], horizontal=True, key="mesa_modo")
+    with col_settle:
+        mesa_settlement = st.date_input("Settlement (comparación)", value=date.today(), key="mesa_settlement")
 
     mesa_rows = []
-    for _, row in edited.iterrows():
+    for _, row in monitor_universe.iterrows():
         n = row["nombre"]
-        default_price = st.session_state[session_key][n]
         mesa_rows.append({
             "nombre": n,
             "isin": row.get("isin", ""),
-            "categoria": row.get("categoria", ""),
+            "codigo": row.get("codigo", ""),
             "coupon_pct": row["coupon_pct"],
             "maturity": row["maturity"],
-            "precio_limpio": default_price,
+            "px_bid": st.session_state[px_bid_key][n],
+            "px_offer": st.session_state[px_offer_key][n],
+            "yield_bid": st.session_state[yld_bid_key][n],
+            "yield_offer": st.session_state[yld_offer_key][n],
         })
     mesa_df = pd.DataFrame(mesa_rows)
 
+    campos_identificacion = ["nombre", "isin", "codigo", "coupon_pct", "maturity"]
+    if modo_mesa == "Precio":
+        columnas_visibles = campos_identificacion + ["px_bid", "px_offer"]
+        disabled_cols = campos_identificacion
+    else:
+        columnas_visibles = campos_identificacion + ["yield_bid", "yield_offer"]
+        disabled_cols = campos_identificacion
+
     mesa_edited = st.data_editor(
-        mesa_df,
+        mesa_df[columnas_visibles],
         use_container_width=True,
         hide_index=True,
-        disabled=["nombre", "isin", "categoria", "coupon_pct", "maturity"],
+        disabled=disabled_cols,
         column_config={
-            "precio_limpio": st.column_config.NumberColumn("Precio limpio", format="%.4f"),
+            "coupon_pct": st.column_config.NumberColumn("Cupón %", format="%.3f"),
+            "px_bid": st.column_config.NumberColumn("Px Bid", format="%.4f"),
+            "px_offer": st.column_config.NumberColumn("Px Offer", format="%.4f"),
+            "yield_bid": st.column_config.NumberColumn("Yield Bid %", format="%.4f"),
+            "yield_offer": st.column_config.NumberColumn("Yield Offer %", format="%.4f"),
         },
-        key=f"mesa_editor_{pais}",
+        key=f"mesa_editor_{pais}_{modo_mesa}",
     )
 
     resultados = []
     for _, row in mesa_edited.iterrows():
-        bono_row = edited[edited["nombre"] == row["nombre"]].iloc[0]
+        n = row["nombre"]
+        bono_row = edited[edited["nombre"] == n].iloc[0]
         b = make_bond(bono_row)
-        s = b.summary(mesa_settlement, clean_price=float(row["precio_limpio"]))
+
+        if modo_mesa == "Precio":
+            px_bid = float(row["px_bid"])
+            px_offer = float(row["px_offer"])
+            yield_bid = b.yield_from_clean_price(px_bid, mesa_settlement)
+            yield_offer = b.yield_from_clean_price(px_offer, mesa_settlement)
+        else:
+            yield_bid = float(row["yield_bid"])
+            yield_offer = float(row["yield_offer"])
+            px_bid = b.clean_price(yield_bid, mesa_settlement)
+            px_offer = b.clean_price(yield_offer, mesa_settlement)
+
+        st.session_state[px_bid_key][n] = px_bid
+        st.session_state[px_offer_key][n] = px_offer
+        st.session_state[yld_bid_key][n] = yield_bid
+        st.session_state[yld_offer_key][n] = yield_offer
+
+        px_mid = (px_bid + px_offer) / 2
+        s_mid = b.summary(mesa_settlement, clean_price=px_mid)
+        paridad = b.paridad(px_mid, mesa_settlement)
+
         resultados.append({
-            "nombre": row["nombre"],
-            "categoria": row.get("categoria", ""),
-            "precio_limpio": s["precio_limpio"],
-            "ytm_pct": s["ytm_pct"],
-            "duracion_modificada": s["duracion_modificada"],
-            "convexidad": s["convexidad"],
+            "nombre": n,
+            "isin": bono_row.get("isin", ""),
+            "codigo": bono_row.get("codigo", ""),
+            "yield_bid": round(yield_bid, 4),
+            "yield_offer": round(yield_offer, 4),
+            "px_bid": round(px_bid, 4),
+            "px_offer": round(px_offer, 4),
+            "spread_bid_offer_bps": round((yield_bid - yield_offer) * 100, 2),
+            "maturity": bono_row["maturity"],
+            "cupon_pct": bono_row["coupon_pct"],
+            "duracion_modificada": round(s_mid["duracion_modificada"], 4),
+            "paridad": round(paridad, 4),
         })
-        st.session_state[session_key][row["nombre"]] = float(row["precio_limpio"])
 
     st.dataframe(pd.DataFrame(resultados).rename(columns=str.upper), use_container_width=True, hide_index=True)

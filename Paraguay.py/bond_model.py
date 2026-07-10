@@ -94,6 +94,13 @@ class Bond:
     def clean_price(self, ytm_pct: float, settlement: date) -> float:
         return self.dirty_price(ytm_pct, settlement) - self.accrued_interest(settlement)
 
+    def paridad(self, clean_price: float, settlement: date) -> float:
+        """Precio sucio sobre valor tecnico (face + interes corrido), en %."""
+        accrued = self.accrued_interest(settlement)
+        valor_tecnico = self.face + accrued
+        dirty = clean_price + accrued
+        return dirty / valor_tecnico * 100
+
     def yield_from_clean_price(self, clean_price: float, settlement: date,
                                 tol: float = 1e-8, max_iter: int = 100) -> float:
         lo, hi = -5.0, 40.0
