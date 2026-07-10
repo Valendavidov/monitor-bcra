@@ -14,7 +14,6 @@ import os
 from datetime import date
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from bond_model import Bond
@@ -108,7 +107,7 @@ if registry.empty:
     st.warning("El universo de bonos esta vacio. Anda a la tab 'Monitor de bonos' para cargar uno.")
     st.stop()
 
-tab_cashflow, tab_yas, tab_monitor = st.tabs(["Cashflows", "Valoración (YAS)", "Monitor de bonos"])
+tab_cashflow, tab_yas, tab_monitor = st.tabs(["Cashflows", "YAS", "Monitor de bonos"])
 
 
 # ── Tab 1: Cashflows ─────────────────────────────────────────────────────────
@@ -183,31 +182,6 @@ with tab_yas:
             st.markdown(f'<div class="yas-value">{summary["convexidad"]:.4f}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">SETTLEMENT</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{summary["settlement"]}</div>', unsafe_allow_html=True)
-
-    st.divider()
-    st.markdown("#### Sensibilidad precio / yield")
-    base_ytm = summary["ytm_pct"]
-    yields = [base_ytm + delta for delta in range(-300, 301, 10)]  # +/- 3 puntos, paso 10bps
-    prices = [bond.clean_price(y, settlement) for y in [v / 100 for v in yields]]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=[v / 100 for v in yields], y=prices, mode="lines",
-        name="Precio limpio", line=dict(color=PY_BLUE, width=2),
-    ))
-    fig.add_trace(go.Scatter(
-        x=[summary["ytm_pct"]], y=[summary["precio_limpio"]],
-        mode="markers", marker=dict(size=10, color=PY_RED), name="Punto actual",
-    ))
-    fig.update_layout(
-        xaxis_title="YTM %", yaxis_title="Precio limpio",
-        hovermode="x unified", height=380, margin=dict(l=0, r=0, t=20, b=0),
-        paper_bgcolor="#0E1116", plot_bgcolor="#0E1116",
-        font=dict(color="#C9CDD4"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
-    fig.update_xaxes(gridcolor="#262B33")
-    fig.update_yaxes(gridcolor="#262B33")
-    st.plotly_chart(fig, use_container_width=True)
 
 
 # ── Tab 3: Monitor de bonos (universo + comparacion) ────────────────────────
