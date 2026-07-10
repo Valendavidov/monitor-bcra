@@ -12,14 +12,17 @@ Uso:
 """
 
 import os
+import sys
 from datetime import date
 
 import pandas as pd
 import streamlit as st
 
-from bond_model import Bond
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
-BASE_DIR = os.path.dirname(__file__)
+from bond_model import Bond
 
 PAISES = {
     "Paraguay": {
