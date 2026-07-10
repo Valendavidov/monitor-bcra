@@ -4,14 +4,25 @@ MOTOR DE CALCULO DE BONOS (bond_model.py)
 
 Este archivo es el "cerebro" matematico de toda la app. No tiene nada de
 Streamlit ni de interfaz: solo modela un bono soberano tipico (bullet,
-cupon fijo, pago semestral) y sabe convertir entre precio y yield, calcular
-cashflows, duration, convexidad y paridad. La app (bonos_pyg_app.py)
-importa la clase Bond de aca y solo se encarga de mostrar los numeros.
+cupon fijo, pago semestral, con opcion de calls/amortizacion anticipada)
+y sabe convertir entre precio y yield, calcular cashflows, duration,
+convexidad y paridad. La app (bonos_pyg_app.py) importa la clase Bond de
+aca y solo se encarga de mostrar los numeros.
 
 Conceptos clave para orientarse en el archivo:
 
 - BONO "BULLET": paga cupones fijos periodicos y devuelve el 100% del
   capital (face) recien en la fecha de vencimiento (no amortiza antes).
+- CALL (rescate anticipado): el emisor puede optar por devolver el
+  capital antes del vencimiento normal, en una fecha y a un precio
+  pactados de antemano. Un bono puede tener 0, 1 o varias fechas de call.
+- YIELD/PRECIO "TO WORST": cuando un bono tiene calls, no hay un unico
+  "yield" - depende de si el emisor termina ejerciendo el call o no. La
+  convencion de mercado es calcular TODOS los escenarios posibles
+  (vencimiento normal + cada call) y quedarse con el PEOR para el
+  tenedor (el yield mas bajo / el precio mas bajo). Si el bono no tiene
+  calls, "to worst" es exactamente lo mismo que "to maturity" (YTM) - no
+  cambia nada para los bonos bullet puros.
 - CONVENCION 30/360: para contar dias entre dos fechas, se asume que todos
   los meses tienen 30 dias y el año 360. Es la convencion estandar en
   bonos soberanos emergentes en USD (no es la cantidad real de dias
@@ -26,10 +37,6 @@ Conceptos clave para orientarse en el archivo:
   que realmente se paga al comprar el bono, e incluye el interes ya
   devengado desde el ultimo pago de cupon (accrued interest):
       precio sucio = precio limpio + interes corrido
-- YIELD (YTM, yield to maturity): la tasa de descuento que iguala el valor
-  presente de todos los flujos futuros (cupones + capital) con el precio
-  sucio de hoy. Es "la tasa a la que rinde el bono" si lo comprás hoy y lo
-  mantenés hasta el vencimiento.
 - DURATION: mide, en años, cuanto tarda en "recuperarse" el precio del bono
   pesando cada flujo por su valor presente (Macaulay), y cuanto se mueve el
   precio ante cambios de 1% en la tasa (duration modificada). A mayor
@@ -41,7 +48,7 @@ Conceptos clave para orientarse en el archivo:
   tecnico, mas alla del precio limpio nominal.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import pandas as pd
 
@@ -87,19 +94,30 @@ def add_months(d: date, months: int) -> date:
 # ---------------------------------------------------------------------------
 @dataclass
 class Bond:
-    """Representa un bono bullet de cupon fijo.
+    """Representa un bono bullet de cupon fijo, con calls opcionales.
 
     Atributos:
         coupon_pct: cupon anual en % (ej. 7.9 significa 7.90% anual).
         maturity:   fecha de vencimiento (ahi se paga el ultimo cupon + capital).
         face:       valor nominal / "cara" del bono, casi siempre 100.
         freq:       pagos de cupon por año (2 = semestral, el caso tipico).
+        calls:      lista opcional de (fecha_call, precio_call) - fechas
+                    en las que el emisor puede rescatar el bono antes del
+                    vencimiento, y a que precio. Vacia si es bullet puro.
     """
 
     coupon_pct: float
     maturity: date
     face: float = 100.0
     freq: int = 2
+    calls: list = field(default_factory=list)
+
+    @property
+    def redemption_scenarios(self) -> list[tuple[date, float]]:
+        """Todas las formas en que el bono puede terminar: el vencimiento
+        normal (maturity, face) mas cada call cargado. Se usan para
+        calcular yield/precio "to worst" (ver docstring del modulo)."""
+        return [(self.maturity, self.face)] + list(self.calls)
 
     def coupon_dates(self, settlement: date) -> list[date]:
         """Reconstruye el calendario de pagos de cupon.
@@ -141,13 +159,22 @@ class Bond:
         f = (period_days - accrued_days) / period_days
         return prev_coupon, next_coupon, future, period_days, accrued_days, f
 
-    def cashflows(self, settlement: date) -> pd.DataFrame:
+    def cashflows(self, settlement: date, redemption_date: date = None,
+                  redemption_price: float = None) -> pd.DataFrame:
         """Tabla de todos los pagos futuros del bono desde el settlement.
 
-        Cada fila es un pago de cupon (y el ultimo ademas incluye el
-        capital). La columna "periodos_semestrales" es el tiempo hasta ese
-        flujo medido en cantidad de periodos de cupon (no en años ni en
-        dias) - es la unidad que se usa para descontar a valor presente.
+        Por defecto asume que el bono llega al vencimiento normal. Si se
+        pasan `redemption_date`/`redemption_price`, genera los flujos
+        como si el bono se rescatara (call) ahi en cambio: cupones
+        normales hasta esa fecha, y ahi un flujo final de
+        `redemption_price` (en vez de seguir hasta el vencimiento). Si
+        `redemption_date` no coincide con una fecha de cupon exacta (caso
+        raro, pero posible), el ultimo flujo incluye el cupon corrido
+        (30/360) hasta ese dia.
+
+        La columna "periodos_semestrales" es el tiempo hasta ese flujo
+        medido en cantidad de periodos de cupon (no en años ni en dias) -
+        es la unidad que se usa para descontar a valor presente.
 
         Los numeros salen SIN redondear: esta tabla la reusan dirty_price()
         y duration_convexity() para calcular precio/duration, y redondear
@@ -155,42 +182,80 @@ class Bond:
         El redondeo a 3 decimales es cosa de la interfaz (bonos_pyg_app.py),
         no del motor de calculo.
         """
+        if redemption_date is None:
+            redemption_date, redemption_price = self.maturity, self.face
+
         _, _, future, _, _, f = self.schedule(settlement)
         coupon_amt = self.coupon_pct / 100 / self.freq * self.face
+        period_nominal = 360 / self.freq
         rows = []
+        last_date, last_t = self.schedule(settlement)[0], f - 1
         for i, d in enumerate(future):
-            amount = coupon_amt + (self.face if d == self.maturity else 0.0)
-            t = f + i  # tiempo en periodos de cupon desde el settlement
-            rows.append({
-                "fecha": d,
-                "dias_desde_settlement_30_360": days_30_360(settlement, d),
-                "periodos_semestrales": t,
-                "cupon": coupon_amt,
-                "principal": self.face if d == self.maturity else 0.0,
-                "flujo_total": amount,
-            })
+            t = f + i
+            if d < redemption_date:
+                rows.append({
+                    "fecha": d,
+                    "dias_desde_settlement_30_360": days_30_360(settlement, d),
+                    "periodos_semestrales": t,
+                    "cupon": coupon_amt,
+                    "principal": 0.0,
+                    "flujo_total": coupon_amt,
+                })
+                last_date, last_t = d, t
+            elif d == redemption_date:
+                rows.append({
+                    "fecha": d,
+                    "dias_desde_settlement_30_360": days_30_360(settlement, d),
+                    "periodos_semestrales": t,
+                    "cupon": coupon_amt,
+                    "principal": redemption_price,
+                    "flujo_total": coupon_amt + redemption_price,
+                })
+                return pd.DataFrame(rows)
+            else:
+                # el rescate cae ANTES de este cupon (no coincide con el
+                # calendario regular): armamos un flujo final con el
+                # cupon corrido (30/360) desde el ultimo cupon pagado -
+                # el tenedor cobra ese interes prorrateado, no cero.
+                stub_days = days_30_360(last_date, redemption_date)
+                t_redencion = last_t + stub_days / period_nominal
+                cupon_corrido = coupon_amt * stub_days / period_nominal
+                rows.append({
+                    "fecha": redemption_date,
+                    "dias_desde_settlement_30_360": days_30_360(settlement, redemption_date),
+                    "periodos_semestrales": t_redencion,
+                    "cupon": cupon_corrido,
+                    "principal": redemption_price,
+                    "flujo_total": redemption_price + cupon_corrido,
+                })
+                return pd.DataFrame(rows)
         return pd.DataFrame(rows)
 
     def accrued_interest(self, settlement: date) -> float:
         """Interes corrido: la parte del cupon actual ya "devengada" pero
         todavia no pagada, proporcional a los dias transcurridos desde el
         ultimo cupon. Esto es lo que se le suma al precio limpio para
-        llegar al precio sucio (lo que realmente se paga)."""
+        llegar al precio sucio (lo que realmente se paga). No depende de
+        si el bono termina en un call o en el vencimiento normal."""
         _, _, _, period_days, accrued_days, _ = self.schedule(settlement)
         coupon_amt = self.coupon_pct / 100 / self.freq * self.face
         return coupon_amt * accrued_days / period_days
 
-    def dirty_price(self, ytm_pct: float, settlement: date) -> float:
+    def dirty_price(self, ytm_pct: float, settlement: date, redemption_date: date = None,
+                     redemption_price: float = None) -> float:
         """Precio sucio dado un yield: se descuentan todos los flujos
-        futuros (cashflows) a la tasa ytm_pct y se suman (valor presente)."""
-        cf = self.cashflows(settlement)
+        futuros (cashflows) a la tasa ytm_pct y se suman (valor presente).
+        Por defecto asume vencimiento normal; ver `cashflows()` para el
+        significado de `redemption_date`/`redemption_price`."""
+        cf = self.cashflows(settlement, redemption_date, redemption_price)
         y2 = ytm_pct / 100 / self.freq  # tasa por periodo (semestral)
         pv = cf["flujo_total"] / (1 + y2) ** cf["periodos_semestrales"]
         return float(pv.sum())
 
-    def clean_price(self, ytm_pct: float, settlement: date) -> float:
+    def clean_price(self, ytm_pct: float, settlement: date, redemption_date: date = None,
+                     redemption_price: float = None) -> float:
         """Precio limpio = precio sucio menos el interes ya corrido."""
-        return self.dirty_price(ytm_pct, settlement) - self.accrued_interest(settlement)
+        return self.dirty_price(ytm_pct, settlement, redemption_date, redemption_price) - self.accrued_interest(settlement)
 
     def paridad(self, clean_price: float, settlement: date) -> float:
         """Paridad = precio sucio / valor tecnico, en %.
@@ -206,18 +271,20 @@ class Bond:
         return dirty / valor_tecnico * 100
 
     def yield_from_clean_price(self, clean_price: float, settlement: date,
-                                tol: float = 1e-8, max_iter: int = 100) -> float:
+                                tol: float = 1e-8, max_iter: int = 100,
+                                redemption_date: date = None, redemption_price: float = None) -> float:
         """Camino inverso: dado un precio limpio, encuentra el yield que lo
-        produce. No hay formula cerrada para esto, asi que se resuelve por
-        busqueda binaria (bisection): como el precio cae cuando el yield
-        sube (relacion monotona), se va acotando el intervalo [lo, hi]
-        hasta que el precio que da "mid" esta lo bastante cerca del
-        precio buscado.
+        produce (para un escenario de redencion dado - por defecto, el
+        vencimiento normal). No hay formula cerrada para esto, asi que se
+        resuelve por busqueda binaria (bisection): como el precio cae
+        cuando el yield sube (relacion monotona), se va acotando el
+        intervalo [lo, hi] hasta que el precio que da "mid" esta lo
+        bastante cerca del precio buscado.
         """
         lo, hi = -5.0, 40.0
         for _ in range(max_iter):
             mid = (lo + hi) / 2
-            if self.clean_price(mid, settlement) > clean_price:
+            if self.clean_price(mid, settlement, redemption_date, redemption_price) > clean_price:
                 lo = mid  # el precio a "mid" es muy alto -> el yield real es mayor
             else:
                 hi = mid  # el precio a "mid" es muy bajo -> el yield real es menor
@@ -225,8 +292,35 @@ class Bond:
                 break
         return (lo + hi) / 2
 
-    def duration_convexity(self, ytm_pct: float, settlement: date):
-        """Sensibilidad del precio ante cambios de yield.
+    def price_to_worst(self, ytm_pct: float, settlement: date) -> float:
+        """Entre el vencimiento normal y cada call cargado, el "peor"
+        precio para el tenedor a un yield dado es el MAS BAJO de todos
+        los escenarios. Si no hay calls, es identico a clean_price()."""
+        escenarios = [(d, p) for d, p in self.redemption_scenarios if d > settlement]
+        return min(self.clean_price(ytm_pct, settlement, d, p) for d, p in escenarios)
+
+    def yield_to_worst(self, clean_price: float, settlement: date) -> float:
+        """Analogo pero al reves: el "peor" yield para el tenedor a un
+        precio dado es el MAS BAJO entre todos los escenarios posibles.
+        Si no hay calls, es identico a yield_from_clean_price()."""
+        escenarios = [(d, p) for d, p in self.redemption_scenarios if d > settlement]
+        return min(
+            self.yield_from_clean_price(clean_price, settlement, redemption_date=d, redemption_price=p)
+            for d, p in escenarios
+        )
+
+    def worst_scenario(self, settlement: date, ytm_pct: float) -> tuple[date, float]:
+        """Cual de los escenarios (vencimiento o algun call) es el que da
+        el precio mas bajo a ese yield - o sea, cual es "el peor" en la
+        practica. Sirve para mostrarle al usuario cual es (ej. "vence
+        normal" vs "se llama tal fecha")."""
+        escenarios = [(d, p) for d, p in self.redemption_scenarios if d > settlement]
+        return min(escenarios, key=lambda dp: self.clean_price(ytm_pct, settlement, dp[0], dp[1]))
+
+    def duration_convexity(self, ytm_pct: float, settlement: date, redemption_date: date = None,
+                            redemption_price: float = None):
+        """Sensibilidad del precio ante cambios de yield, para un
+        escenario de redencion dado (por defecto, el vencimiento normal).
 
         - macaulay_years: promedio ponderado (por valor presente) del
           tiempo hasta cada flujo, en años. Es el "centro de gravedad"
@@ -237,7 +331,7 @@ class Bond:
         - convexity: correccion de segundo orden; la relacion precio/yield
           es curva, no lineal, y la convexidad mide esa curvatura.
         """
-        cf = self.cashflows(settlement)
+        cf = self.cashflows(settlement, redemption_date, redemption_price)
         y2 = ytm_pct / 100 / self.freq
         t = cf["periodos_semestrales"]
         pv = cf["flujo_total"] / (1 + y2) ** t
@@ -255,18 +349,27 @@ class Bond:
         """Punto de entrada principal: le pasas precio O yield (uno de los
         dos) y devuelve todo lo demas ya calculado y redondeado a 3
         decimales, listo para mostrar en la interfaz.
+
+        Si el bono tiene calls, el yield/precio devuelto es "to worst"
+        (ver docstring del modulo) - se evaluan todos los escenarios
+        posibles y se usa el peor para el tenedor. Duration y convexidad
+        se calculan contra ESE escenario ganador, no siempre contra el
+        vencimiento normal. `escenario_fecha`/`escenario_precio` en el
+        resultado indican cual escenario resulto ser el peor.
         """
         if clean_price is None and ytm_pct is None:
             raise ValueError("Pasa clean_price o ytm_pct")
 
         # Si me dieron precio, calculo el yield que lo explica (y viceversa).
         if ytm_pct is None:
-            ytm_pct = self.yield_from_clean_price(clean_price, settlement)
+            ytm_pct = self.yield_to_worst(clean_price, settlement)
         if clean_price is None:
-            clean_price = self.clean_price(ytm_pct, settlement)
+            clean_price = self.price_to_worst(ytm_pct, settlement)
+
+        escenario_fecha, escenario_precio = self.worst_scenario(settlement, ytm_pct)
 
         accrued = self.accrued_interest(settlement)
-        dc = self.duration_convexity(ytm_pct, settlement)
+        dc = self.duration_convexity(ytm_pct, settlement, escenario_fecha, escenario_precio)
         return {
             "settlement": settlement,
             "precio_limpio": round(clean_price, 3),
@@ -276,4 +379,7 @@ class Bond:
             "duracion_macaulay_anios": round(dc["macaulay_years"], 3),
             "duracion_modificada": round(dc["modified_duration"], 3),
             "convexidad": round(dc["convexity"], 3),
+            "escenario_fecha": escenario_fecha,
+            "escenario_precio": escenario_precio,
+            "es_call": escenario_fecha != self.maturity,
         }

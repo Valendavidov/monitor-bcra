@@ -55,6 +55,11 @@ from bond_model import Bond
 # si la nube reinicia/redeploya la app, porque ese archivo no se sube a git).
 LAST_YIELDS_PATH = os.path.join(BASE_DIR, "yas_ultimos_yields.json")
 
+# Cronograma de calls (rescate anticipado) por bono, compartido entre
+# Paraguay y Uruguay (un solo archivo, no por pais). Bonos que no
+# aparecen aca se tratan como bullet puro (sin calls).
+CALLS_PATH = os.path.join(BASE_DIR, "bonos_calls.csv")
+
 
 # =============================================================================
 # 1) CONFIGURACION GENERAL
@@ -246,9 +251,30 @@ def guardar_ultimo_yield(nombre_bono: str, ytm_pct: float) -> None:
         json.dump(data, f, indent=2)
 
 
+def load_calls() -> dict:
+    """Lee bonos_calls.csv y arma {nombre_del_bono: [(fecha, precio), ...]}.
+
+    Si el archivo no existe (o un bono no aparece en el), ese bono se
+    trata como bullet puro (sin calls) - ver Bond.calls en bond_model.py.
+    """
+    if not os.path.exists(CALLS_PATH):
+        return {}
+    df = pd.read_csv(CALLS_PATH)
+    df["call_date"] = pd.to_datetime(df["call_date"]).dt.date
+    calls: dict = {}
+    for _, row in df.iterrows():
+        calls.setdefault(row["nombre"], []).append((row["call_date"], float(row["call_price"])))
+    return calls
+
+
+CALLS = load_calls()  # se lee una sola vez al arrancar la app
+
+
 def make_bond(row: pd.Series) -> Bond:
     """Convierte una fila del universo (del CSV o de una tabla editada) en
-    un objeto Bond de bond_model.py, listo para pedirle precio/yield/etc."""
+    un objeto Bond de bond_model.py, listo para pedirle precio/yield/etc.
+    Si el bono tiene calls cargados en bonos_calls.csv, se los pasa para
+    que el motor calcule yield/precio "to worst" en vez de a vencimiento."""
     maturity = row["maturity"]
     if not isinstance(maturity, date):
         maturity = pd.to_datetime(maturity).date()
@@ -257,6 +283,7 @@ def make_bond(row: pd.Series) -> Bond:
         maturity=maturity,
         face=float(row["face"]),
         freq=int(row["freq"]),
+        calls=CALLS.get(row["nombre"], []),
     )
 
 
@@ -358,7 +385,7 @@ with tab_yas:
             settlement = settlement_habil
         # "Yield" va primero en la lista (y por lo tanto es la opcion por
         # defecto) porque estos bonos se operan/cotizan en tasa, no en precio.
-        modo = st.radio("Ingresar por", ["Yield (YTM %)", "Precio limpio"], key="yas_modo")
+        modo = st.radio("Ingresar por", ["Yield to Worst %", "Precio limpio"], key="yas_modo")
 
         if modo == "Precio limpio":
             clean_price_in = st.number_input("Precio limpio", value=100.0, step=0.25, format=f"%.{DEC}f", key="yas_price")
@@ -371,12 +398,22 @@ with tab_yas:
             # actualiza el archivo y queda como default de aca en mas.
             ytm_default = cargar_ultimo_yield(nombre_sel)
             ytm_in = st.number_input(
-                "Yield (YTM %)", value=ytm_default, step=0.1, format=f"%.{DEC}f",
+                "Yield to Worst %", value=ytm_default, step=0.1, format=f"%.{DEC}f",
                 key=f"yas_ytm_{nombre_sel}",
             )
             guardar_ultimo_yield(nombre_sel, ytm_in)
             bond = make_bond(row_sel)
             summary = bond.summary(settlement, ytm_pct=ytm_in)
+
+        # Si el bono tiene calls cargados (ver bonos_calls.csv), el
+        # "escenario ganador" puede ser un call en vez del vencimiento
+        # normal - se lo mostramos al usuario para que sepa a que se
+        # esta refiriendo el yield/precio de arriba.
+        if bond.calls:
+            if summary["es_call"]:
+                st.caption(f"Escenario worst: call del {summary['escenario_fecha']} @ {summary['escenario_precio']}")
+            else:
+                st.caption(f"Escenario worst: vencimiento normal ({summary['escenario_fecha']})")
 
     with col_grid:
         # summary es el diccionario que devuelve Bond.summary() en
@@ -386,7 +423,7 @@ with tab_yas:
         st.markdown(f'<div class="yas-value">{isin_txt}</div>', unsafe_allow_html=True)
         g1, g2 = st.columns(2)
         with g1:
-            st.markdown('<div class="yas-label">YIELD (YTM %)</div>', unsafe_allow_html=True)
+            st.markdown('<div class="yas-label">YIELD TO WORST %</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{fmt_es(summary["ytm_pct"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">PRECIO LIMPIO</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{fmt_es(summary["precio_limpio"])}</div>', unsafe_allow_html=True)
@@ -523,8 +560,8 @@ with tab_monitor:
             b_seed = make_bond(bono_seed)
             st.session_state[yld_bid_key][n] = 6.50
             st.session_state[yld_offer_key][n] = 6.30
-            st.session_state[px_bid_key][n] = b_seed.clean_price(6.50, mesa_settlement)
-            st.session_state[px_offer_key][n] = b_seed.clean_price(6.30, mesa_settlement)
+            st.session_state[px_bid_key][n] = b_seed.price_to_worst(6.50, mesa_settlement)
+            st.session_state[px_offer_key][n] = b_seed.price_to_worst(6.30, mesa_settlement)
 
     # Armamos la tabla a mostrar leyendo los valores actuales de
     # session_state (lo ultimo que el usuario edito, o la semilla si es
@@ -618,13 +655,13 @@ with tab_monitor:
         if modo_mesa == "Precio":
             px_bid = float(row["px_bid"])
             px_offer = float(row["px_offer"])
-            yield_bid = b.yield_from_clean_price(px_bid, mesa_settlement)
-            yield_offer = b.yield_from_clean_price(px_offer, mesa_settlement)
+            yield_bid = b.yield_to_worst(px_bid, mesa_settlement)
+            yield_offer = b.yield_to_worst(px_offer, mesa_settlement)
         else:
             yield_bid = float(row["yield_bid"])
             yield_offer = float(row["yield_offer"])
-            px_bid = b.clean_price(yield_bid, mesa_settlement)
-            px_offer = b.clean_price(yield_offer, mesa_settlement)
+            px_bid = b.price_to_worst(yield_bid, mesa_settlement)
+            px_offer = b.price_to_worst(yield_offer, mesa_settlement)
 
         st.session_state[px_bid_key][n] = px_bid
         st.session_state[px_offer_key][n] = px_offer
