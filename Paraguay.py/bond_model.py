@@ -12,13 +12,15 @@ Conceptos clave para orientarse en el archivo:
 
 - BONO "BULLET": paga cupones fijos periodicos y devuelve el 100% del
   capital (face) recien en la fecha de vencimiento (no amortiza antes).
-- CONVENCION ACTUAL/360: para calcular interes corrido y descontar flujos,
-  se usan los dias REALES de calendario entre fechas (no una aproximacion
-  de "meses de 30 dias"), pero divididos siempre por un denominador fijo
-  de 360/freq dias (180 para pago semestral) en vez de por la duracion
-  real de cada periodo. Es la convencion que se usa para estos bonos
-  puntuales (confirmada por el usuario) - notar que esto es distinto de
-  "Actual/Actual", que divide por la duracion real del periodo.
+- CONVENCION 30/360: para contar dias entre dos fechas, se asume que todos
+  los meses tienen 30 dias y el año 360. Es la convencion estandar en
+  bonos soberanos emergentes en USD (no es la cantidad real de dias
+  calendario, es una regla contable). Se probo tambien Actual/360, pero
+  se descarto: al validar contra un numero de referencia real (precio a
+  yield 9% para el Paraguay 31) 30/360 daba una coincidencia exacta a 6
+  decimales (95.939241) mientras que Actual/360 daba 95.915 - evidencia
+  bastante mas solida que la de la prueba anterior, asi que se volvio
+  para atras.
 - PRECIO LIMPIO (clean price) vs PRECIO SUCIO (dirty price): el precio
   limpio es el que se cotiza en pantalla/mercado. El precio sucio es lo
   que realmente se paga al comprar el bono, e incluye el interes ya
@@ -45,17 +47,23 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------------
-# Funciones de fechas (convencion Actual/360)
+# Funciones de fechas (convencion 30/360)
 # ---------------------------------------------------------------------------
-def days_actual(d1: date, d2: date) -> int:
-    """Dias reales de calendario entre d1 y d2 (resta de fechas comun).
+def days_30_360(d1: date, d2: date) -> int:
+    """Cuenta los dias entre d1 y d2 asumiendo meses de 30 dias (30/360 US).
 
-    A diferencia de 30/360, esto SI cuenta los dias tal como caen en el
-    calendario (28, 30 o 31 segun el mes). El "/360" de la convencion
-    Actual/360 aparece despues, cuando estos dias se dividen por el
-    denominador fijo Bond.nominal_period_days (ver mas abajo).
+    Ejemplo: de 15-ene a 15-feb son "30 dias" aunque el calendario real
+    tenga 31. Esta es la convencion que usan los bonos que modelamos, asi
+    que TODO el resto del archivo cuenta dias con esta funcion, nunca con
+    resta de fechas directa.
     """
-    return (d2 - d1).days
+    y1, m1, day1 = d1.year, d1.month, d1.day
+    y2, m2, day2 = d2.year, d2.month, d2.day
+    if day1 == 31:
+        day1 = 30
+    if day2 == 31 and day1 == 30:
+        day2 = 30
+    return (y2 - y1) * 360 + (m2 - m1) * 30 + (day2 - day1)
 
 
 def add_months(d: date, months: int) -> date:
@@ -93,16 +101,6 @@ class Bond:
     face: float = 100.0
     freq: int = 2
 
-    @property
-    def nominal_period_days(self) -> float:
-        """Denominador fijo de la convencion Actual/360 para un periodo de
-        cupon: 360/freq (180 dias para pago semestral). Es "nominal" porque
-        NO es la cantidad real de dias que tiene ese periodo en el
-        calendario (que puede ser 181, 184, etc.) - Actual/360 siempre usa
-        este numero fijo como denominador, a proposito.
-        """
-        return 360 / self.freq
-
     def coupon_dates(self, settlement: date) -> list[date]:
         """Reconstruye el calendario de pagos de cupon.
 
@@ -130,18 +128,17 @@ class Bond:
             prev_coupon:   fecha del ultimo cupon ya pagado (antes de settlement).
             next_coupon:   fecha del proximo cupon a cobrar.
             future:        lista de todas las fechas de pago que quedan (incluye vencimiento).
-            period_days:   dias REALES de calendario que tiene el periodo actual (informativo).
-            accrued_days:  dias reales ya transcurridos dentro de ese periodo (desde prev_coupon).
-            f:             fraccion (Actual/360) del periodo que falta para el proximo cupon.
+            period_days:   duracion del periodo de cupon actual, en dias 30/360.
+            accrued_days:  dias ya transcurridos dentro de ese periodo (desde prev_coupon).
+            f:             fraccion del periodo que falta para el proximo cupon (0 a 1).
         """
         dates = self.coupon_dates(settlement)
         prev_coupon = dates[0]
         future = [d for d in dates[1:] if d > settlement]
         next_coupon = future[0]
-        period_days = days_actual(prev_coupon, next_coupon)
-        accrued_days = days_actual(prev_coupon, settlement)
-        remaining_days = days_actual(settlement, next_coupon)
-        f = remaining_days / self.nominal_period_days
+        period_days = days_30_360(prev_coupon, next_coupon) or (360 // self.freq)
+        accrued_days = days_30_360(prev_coupon, settlement)
+        f = (period_days - accrued_days) / period_days
         return prev_coupon, next_coupon, future, period_days, accrued_days, f
 
     def cashflows(self, settlement: date) -> pd.DataFrame:
@@ -151,6 +148,12 @@ class Bond:
         capital). La columna "periodos_semestrales" es el tiempo hasta ese
         flujo medido en cantidad de periodos de cupon (no en años ni en
         dias) - es la unidad que se usa para descontar a valor presente.
+
+        Los numeros salen SIN redondear: esta tabla la reusan dirty_price()
+        y duration_convexity() para calcular precio/duration, y redondear
+        aca adentro introduciria un error chico pero real en esas cuentas.
+        El redondeo a 3 decimales es cosa de la interfaz (bonos_pyg_app.py),
+        no del motor de calculo.
         """
         _, _, future, _, _, f = self.schedule(settlement)
         coupon_amt = self.coupon_pct / 100 / self.freq * self.face
@@ -160,23 +163,22 @@ class Bond:
             t = f + i  # tiempo en periodos de cupon desde el settlement
             rows.append({
                 "fecha": d,
-                "dias_desde_settlement": days_actual(settlement, d),
-                "periodos_semestrales": round(t, 3),
-                "cupon": round(coupon_amt, 3),
+                "dias_desde_settlement_30_360": days_30_360(settlement, d),
+                "periodos_semestrales": t,
+                "cupon": coupon_amt,
                 "principal": self.face if d == self.maturity else 0.0,
-                "flujo_total": round(amount, 3),
+                "flujo_total": amount,
             })
         return pd.DataFrame(rows)
 
     def accrued_interest(self, settlement: date) -> float:
         """Interes corrido: la parte del cupon actual ya "devengada" pero
-        todavia no pagada, proporcional a los dias reales transcurridos
-        desde el ultimo cupon (Actual/360: dias reales / 180). Esto es lo
-        que se le suma al precio limpio para llegar al precio sucio (lo
-        que realmente se paga)."""
+        todavia no pagada, proporcional a los dias transcurridos desde el
+        ultimo cupon. Esto es lo que se le suma al precio limpio para
+        llegar al precio sucio (lo que realmente se paga)."""
         _, _, _, period_days, accrued_days, _ = self.schedule(settlement)
         coupon_amt = self.coupon_pct / 100 / self.freq * self.face
-        return coupon_amt * accrued_days / self.nominal_period_days
+        return coupon_amt * accrued_days / period_days
 
     def dirty_price(self, ytm_pct: float, settlement: date) -> float:
         """Precio sucio dado un yield: se descuentan todos los flujos
