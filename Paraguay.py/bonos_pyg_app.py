@@ -179,13 +179,6 @@ def load_registry() -> pd.DataFrame:
     return df
 
 
-def save_registry(df: pd.DataFrame) -> None:
-    """Persiste el universo editado de vuelta al CSV (lo pisa entero)."""
-    out = df.copy()
-    out["maturity"] = pd.to_datetime(out["maturity"]).dt.strftime("%Y-%m-%d")
-    out.to_csv(REGISTRY_PATH, index=False)
-
-
 def make_bond(row: pd.Series) -> Bond:
     """Convierte una fila del universo (del CSV o de una tabla editada) en
     un objeto Bond de bond_model.py, listo para pedirle precio/yield/etc."""
@@ -350,47 +343,14 @@ with tab_yas:
 # TAB 3: MONITOR DE BONOS (universo editable + comparacion bid/offer)
 # =============================================================================
 with tab_monitor:
-    # --- 3a) Universo de bonos: agregar/editar/borrar filas, y guardar al CSV ---
-    st.subheader("Universo de bonos")
-    st.caption(
-        "Agrega, edita o elimina bonos. Verificá cupón/vencimiento/ISIN/categoría contra el "
-        "prospecto o el ticker del emisor antes de operar con estos numeros."
-    )
-
-    edited = st.data_editor(
-        registry,
-        num_rows="dynamic",  # permite agregar/borrar filas, no solo editar valores
-        use_container_width=True,
-        # Los "labels" de column_config van directo en mayuscula (ver nota
-        # de la seccion de CSS: estas tablas no se pueden estilar con CSS).
-        column_config={
-            "nombre": st.column_config.TextColumn("NOMBRE", required=True),
-            "isin": st.column_config.TextColumn("ISIN"),
-            "codigo": st.column_config.TextColumn("CÓDIGO"),
-            "categoria": st.column_config.TextColumn("CATEGORÍA"),
-            "coupon_pct": st.column_config.NumberColumn("CUPÓN %", format=f"%.{DEC}f", required=True),
-            "maturity": st.column_config.DateColumn("VENCIMIENTO", required=True),
-            "face": st.column_config.NumberColumn("FACE", default=100.0, required=True),
-            "freq": st.column_config.NumberColumn("PAGOS/AÑO", default=2, required=True),
-        },
-        key=f"registry_editor_{pais}",
-    )
-
-    if st.button("Guardar universo"):
-        save_registry(edited)
-        st.success("Universo guardado.")
-        st.rerun()
-
-    if edited.empty:
-        st.warning("Agrega al menos un bono para ver la comparación.")
-        st.stop()
-
-    # --- 3b) Comparacion rapida: precios/yields bid y offer de todo el universo ---
-    st.divider()
-    st.subheader("Comparación rápida")
+    # El universo de bonos (agregar/editar/borrar) ya no se edita desde la
+    # interfaz: se administra directo en los CSV (bonos_universo_py.csv /
+    # bonos_universo_uy.csv). Esta tab muestra la comparacion bid/offer de
+    # todo ese universo.
+    st.subheader("Monitor de bonos")
     st.caption("Editá precio o yield (bid/offer) directo en la tabla y mirá el resto de los campos calculados.")
 
-    monitor_universe = filtrar_por_categoria(edited, key="cat_monitor")
+    monitor_universe = filtrar_por_categoria(registry, key="cat_monitor")
 
     # st.session_state guarda estos diccionarios {nombre_del_bono: valor}
     # entre una corrida del script y la siguiente. Sin esto, cada vez que
@@ -432,7 +392,7 @@ with tab_monitor:
     tabla_rows = []
     for _, row in monitor_universe.iterrows():
         n = row["nombre"]
-        bono_row = edited[edited["nombre"] == n].iloc[0]
+        bono_row = registry[registry["nombre"] == n].iloc[0]
         b = make_bond(bono_row)
 
         px_bid = st.session_state[px_bid_key][n]
@@ -499,7 +459,7 @@ with tab_monitor:
     # proxima corrida del script ya muestre todo consistente entre si.
     for _, row in tabla_edited.iterrows():
         n = row["nombre"]
-        bono_row = edited[edited["nombre"] == n].iloc[0]
+        bono_row = registry[registry["nombre"] == n].iloc[0]
         b = make_bond(bono_row)
 
         if modo_mesa == "Precio":
