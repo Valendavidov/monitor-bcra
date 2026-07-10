@@ -13,7 +13,7 @@ Uso:
 
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -24,18 +24,23 @@ if BASE_DIR not in sys.path:
 
 from bond_model import Bond
 
+DEC = 3  # decimales estandar en toda la app
+SETTLEMENT_DEFAULT = date.today() + timedelta(days=1)  # T+1
+
 PAISES = {
     "Paraguay": {
         "registry": os.path.join(BASE_DIR, "bonos_universo_py.csv"),
         "primary": "#0038A8",
         "accent": "#D52B1E",
         "flag": ["#0038A8", "#F5F6F7", "#D52B1E"],
+        "moneda": "PYG",
     },
     "Uruguay": {
         "registry": os.path.join(BASE_DIR, "bonos_universo_uy.csv"),
         "primary": "#75AADB",
         "accent": "#FCD116",
         "flag": ["#75AADB", "#F5F6F7", "#75AADB"],
+        "moneda": "UYU",
     },
 }
 
@@ -45,6 +50,7 @@ pais = st.radio("País", list(PAISES.keys()), horizontal=True, key="pais_selecto
 cfg = PAISES[pais]
 PRIMARY = cfg["primary"]
 ACCENT = cfg["accent"]
+MONEDA = cfg["moneda"]
 
 # ── Identidad visual: mayusculas en toda la interfaz, paleta por pais ────────
 st.markdown(
@@ -152,7 +158,7 @@ with tab_cashflow:
     with col_sel:
         nombre_cf = st.selectbox("Bono", registry_cf["nombre"].tolist(), key="cf_bono")
     with col_settle:
-        settlement_cf = st.date_input("Settlement", value=date.today(), key="cf_settlement")
+        settlement_cf = st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="cf_settlement")
 
     row_cf = registry_cf[registry_cf["nombre"] == nombre_cf].iloc[0]
     bond_cf = make_bond(row_cf)
@@ -163,7 +169,7 @@ with tab_cashflow:
     c1, c2, c3 = st.columns(3)
     c1.metric("Cupón anterior", prev_coupon.strftime("%Y-%m-%d"))
     c2.metric("Próximo cupón", next_coupon.strftime("%Y-%m-%d"))
-    c3.metric("Interés corrido", f"{accrued:.4f}")
+    c3.metric("Interés corrido", f"{accrued:.{DEC}f}")
 
     st.subheader("Cashflows futuros")
     cf = bond_cf.cashflows(settlement_cf)
@@ -188,15 +194,15 @@ with tab_yas:
         isin_txt = row_sel.get("isin") or "-"
         st.caption(f"ISIN: {isin_txt}  |  Cupón: {row_sel['coupon_pct']}%  |  Vto: {row_sel['maturity']}")
 
-        settlement = st.date_input("Settlement", value=date.today(), key="yas_settlement")
-        modo = st.radio("Ingresar por", ["Precio limpio", "Yield (YTM %)"], key="yas_modo")
+        settlement = st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="yas_settlement")
+        modo = st.radio("Ingresar por", ["Yield (YTM %)", "Precio limpio"], key="yas_modo")
 
         if modo == "Precio limpio":
-            clean_price_in = st.number_input("Precio limpio", value=100.0, step=0.25, format="%.4f", key="yas_price")
+            clean_price_in = st.number_input("Precio limpio", value=100.0, step=0.25, format=f"%.{DEC}f", key="yas_price")
             bond = make_bond(row_sel)
             summary = bond.summary(settlement, clean_price=clean_price_in)
         else:
-            ytm_in = st.number_input("Yield (YTM %)", value=6.5, step=0.1, format="%.4f", key="yas_ytm")
+            ytm_in = st.number_input("Yield (YTM %)", value=6.5, step=0.1, format=f"%.{DEC}f", key="yas_ytm")
             bond = make_bond(row_sel)
             summary = bond.summary(settlement, ytm_pct=ytm_in)
 
@@ -205,22 +211,43 @@ with tab_yas:
         g1, g2 = st.columns(2)
         with g1:
             st.markdown('<div class="yas-label">YIELD (YTM %)</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["ytm_pct"]:.4f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{summary["ytm_pct"]:.{DEC}f}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">PRECIO LIMPIO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["precio_limpio"]:.4f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{summary["precio_limpio"]:.{DEC}f}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">PRECIO SUCIO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["precio_sucio"]:.4f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{summary["precio_sucio"]:.{DEC}f}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">INTERÉS CORRIDO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["interes_corrido"]:.4f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{summary["interes_corrido"]:.{DEC}f}</div>', unsafe_allow_html=True)
         with g2:
             st.markdown('<div class="yas-label">DURACIÓN MACAULAY (AÑOS)</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["duracion_macaulay_anios"]:.4f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{summary["duracion_macaulay_anios"]:.{DEC}f}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">DURACIÓN MODIFICADA</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["duracion_modificada"]:.4f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{summary["duracion_modificada"]:.{DEC}f}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">CONVEXIDAD</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["convexidad"]:.4f}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{summary["convexidad"]:.{DEC}f}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">SETTLEMENT</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{summary["settlement"]}</div>', unsafe_allow_html=True)
+
+    st.divider()
+    st.markdown("#### Conversión de moneda")
+    col_fx_in, col_fx_out = st.columns(2)
+    with col_fx_in:
+        tipo_cambio = st.number_input(
+            f"Tipo de cambio (USD/{MONEDA})", min_value=0.0, value=0.0, step=1.0,
+            format="%.4f", key="yas_fx",
+        )
+    if tipo_cambio > 0:
+        monto_local = summary["precio_sucio"] * tipo_cambio
+        with col_fx_out:
+            st.markdown(f'<div class="yas-label">EQUIVALENTE EN {MONEDA} (POR 100 NOMINAL)</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{monto_local:,.{DEC}f}</div>', unsafe_allow_html=True)
+        st.caption(
+            f"Precio sucio (USD 100 nominal) × tipo de cambio ingresado = {MONEDA}. "
+            + ("La UI tiene su propio factor de conversión oficial contra el UYU; esto es una aproximación con el tipo de cambio ingresado, no lo reemplaza." if row_sel.get("categoria") == "UI" else "")
+        )
+    else:
+        with col_fx_out:
+            st.caption(f"Ingresá el tipo de cambio USD/{MONEDA} para ver el equivalente en moneda local.")
 
 
 # ── Tab 3: Monitor de bonos (universo + comparacion) ────────────────────────
@@ -236,14 +263,14 @@ with tab_monitor:
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "nombre": st.column_config.TextColumn("Nombre", required=True),
+            "nombre": st.column_config.TextColumn("NOMBRE", required=True),
             "isin": st.column_config.TextColumn("ISIN"),
-            "codigo": st.column_config.TextColumn("Código"),
-            "categoria": st.column_config.TextColumn("Categoría"),
-            "coupon_pct": st.column_config.NumberColumn("Cupón %", format="%.3f", required=True),
-            "maturity": st.column_config.DateColumn("Vencimiento", required=True),
-            "face": st.column_config.NumberColumn("Face", default=100.0, required=True),
-            "freq": st.column_config.NumberColumn("Pagos/año", default=2, required=True),
+            "codigo": st.column_config.TextColumn("CÓDIGO"),
+            "categoria": st.column_config.TextColumn("CATEGORÍA"),
+            "coupon_pct": st.column_config.NumberColumn("CUPÓN %", format=f"%.{DEC}f", required=True),
+            "maturity": st.column_config.DateColumn("VENCIMIENTO", required=True),
+            "face": st.column_config.NumberColumn("FACE", default=100.0, required=True),
+            "freq": st.column_config.NumberColumn("PAGOS/AÑO", default=2, required=True),
         },
         key=f"registry_editor_{pais}",
     )
@@ -270,17 +297,22 @@ with tab_monitor:
     for k in (px_bid_key, px_offer_key, yld_bid_key, yld_offer_key):
         st.session_state.setdefault(k, {})
 
-    for n in monitor_universe["nombre"]:
-        st.session_state[px_bid_key].setdefault(n, 99.50)
-        st.session_state[px_offer_key].setdefault(n, 100.50)
-        st.session_state[yld_bid_key].setdefault(n, 6.50)
-        st.session_state[yld_offer_key].setdefault(n, 6.30)
-
     col_modo, col_settle = st.columns([1, 1])
     with col_modo:
-        modo_mesa = st.radio("Ingresar por", ["Precio", "Yield"], horizontal=True, key="mesa_modo")
+        modo_mesa = st.radio("Ingresar por", ["Yield", "Precio"], horizontal=True, key="mesa_modo")
     with col_settle:
-        mesa_settlement = st.date_input("Settlement (comparación)", value=date.today(), key="mesa_settlement")
+        mesa_settlement = st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
+
+    # Semilla: yield bid/offer por defecto, precio derivado del mismo bono (no un
+    # numero independiente) para que ambos lados arranquen consistentes entre si.
+    for n in monitor_universe["nombre"]:
+        if n not in st.session_state[yld_bid_key]:
+            bono_seed = monitor_universe[monitor_universe["nombre"] == n].iloc[0]
+            b_seed = make_bond(bono_seed)
+            st.session_state[yld_bid_key][n] = 6.50
+            st.session_state[yld_offer_key][n] = 6.30
+            st.session_state[px_bid_key][n] = b_seed.clean_price(6.50, mesa_settlement)
+            st.session_state[px_offer_key][n] = b_seed.clean_price(6.30, mesa_settlement)
 
     tabla_rows = []
     for _, row in monitor_universe.iterrows():
@@ -300,15 +332,15 @@ with tab_monitor:
             "nombre": n,
             "isin": row.get("isin", ""),
             "codigo": row.get("codigo", ""),
-            "yield_bid": round(yield_bid, 4),
-            "yield_offer": round(yield_offer, 4),
-            "px_bid": round(px_bid, 4),
-            "px_offer": round(px_offer, 4),
-            "spread_bid_offer_bps": round((yield_bid - yield_offer) * 100, 2),
+            "yield_bid": round(yield_bid, DEC),
+            "yield_offer": round(yield_offer, DEC),
+            "px_bid": round(px_bid, DEC),
+            "px_offer": round(px_offer, DEC),
+            "spread_bid_offer_bps": round((yield_bid - yield_offer) * 100, DEC),
             "maturity": row["maturity"],
             "cupon_pct": row["coupon_pct"],
-            "duracion_modificada": round(s_mid["duracion_modificada"], 4),
-            "paridad": round(b.paridad(px_mid, mesa_settlement), 4),
+            "duracion_modificada": round(s_mid["duracion_modificada"], DEC),
+            "paridad": round(b.paridad(px_mid, mesa_settlement), DEC),
         })
     tabla_df = pd.DataFrame(tabla_rows)
 
@@ -327,18 +359,18 @@ with tab_monitor:
         hide_index=True,
         disabled=disabled_cols,
         column_config={
-            "nombre": st.column_config.TextColumn("Nombre"),
+            "nombre": st.column_config.TextColumn("NOMBRE"),
             "isin": st.column_config.TextColumn("ISIN"),
-            "codigo": st.column_config.TextColumn("Código"),
-            "yield_bid": st.column_config.NumberColumn("Yield Bid %", format="%.4f"),
-            "yield_offer": st.column_config.NumberColumn("Yield Offer %", format="%.4f"),
-            "px_bid": st.column_config.NumberColumn("Px Bid", format="%.4f"),
-            "px_offer": st.column_config.NumberColumn("Px Offer", format="%.4f"),
-            "spread_bid_offer_bps": st.column_config.NumberColumn("Spread B/O (bps)", format="%.2f"),
-            "maturity": st.column_config.DateColumn("Vencimiento"),
-            "cupon_pct": st.column_config.NumberColumn("Cupón %", format="%.3f"),
-            "duracion_modificada": st.column_config.NumberColumn("Mod. Duration", format="%.4f"),
-            "paridad": st.column_config.NumberColumn("Paridad", format="%.4f"),
+            "codigo": st.column_config.TextColumn("CÓDIGO"),
+            "yield_bid": st.column_config.NumberColumn("YIELD BID %", format=f"%.{DEC}f"),
+            "yield_offer": st.column_config.NumberColumn("YIELD OFFER %", format=f"%.{DEC}f"),
+            "px_bid": st.column_config.NumberColumn("PX BID", format=f"%.{DEC}f"),
+            "px_offer": st.column_config.NumberColumn("PX OFFER", format=f"%.{DEC}f"),
+            "spread_bid_offer_bps": st.column_config.NumberColumn("SPREAD B/O (BPS)", format=f"%.{DEC}f"),
+            "maturity": st.column_config.DateColumn("VENCIMIENTO"),
+            "cupon_pct": st.column_config.NumberColumn("CUPÓN %", format=f"%.{DEC}f"),
+            "duracion_modificada": st.column_config.NumberColumn("MOD. DURATION", format=f"%.{DEC}f"),
+            "paridad": st.column_config.NumberColumn("PARIDAD", format=f"%.{DEC}f"),
         },
         key=f"tabla_editor_{pais}_{modo_mesa}",
     )

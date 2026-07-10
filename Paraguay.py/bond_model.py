@@ -73,10 +73,10 @@ class Bond:
             rows.append({
                 "fecha": d,
                 "dias_desde_settlement_30_360": days_30_360(settlement, d),
-                "periodos_semestrales": round(t, 4),
-                "cupon": round(coupon_amt, 6),
+                "periodos_semestrales": round(t, 3),
+                "cupon": round(coupon_amt, 3),
                 "principal": self.face if d == self.maturity else 0.0,
-                "flujo_total": round(amount, 6),
+                "flujo_total": round(amount, 3),
             })
         return pd.DataFrame(rows)
 
@@ -141,11 +141,11 @@ class Bond:
         dc = self.duration_convexity(ytm_pct, settlement)
         return {
             "settlement": settlement,
-            "precio_limpio": round(clean_price, 4),
-            "precio_sucio": round(clean_price + accrued, 4),
-            "interes_corrido": round(accrued, 4),
-            "ytm_pct": round(ytm_pct, 4),
-            "duracion_macaulay_anios": round(dc["macaulay_years"], 4),
-            "duracion_modificada": round(dc["modified_duration"], 4),
-            "convexidad": round(dc["convexity"], 4),
+            "precio_limpio": round(clean_price, 3),
+            "precio_sucio": round(clean_price + accrued, 3),
+            "interes_corrido": round(accrued, 3),
+            "ytm_pct": round(ytm_pct, 3),
+            "duracion_macaulay_anios": round(dc["macaulay_years"], 3),
+            "duracion_modificada": round(dc["modified_duration"], 3),
+            "convexidad": round(dc["convexity"], 3),
         }
