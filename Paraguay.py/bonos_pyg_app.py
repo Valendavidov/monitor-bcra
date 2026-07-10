@@ -1,11 +1,30 @@
 """
-Monitor de Bonos - Paraguay y Uruguay
+MONITOR DE BONOS — Paraguay y Uruguay
+======================================
 
-App Streamlit con un universo editable de bonos soberanos (bullet, cupon
-fijo, pago semestral, convencion de dias 30/360) para Paraguay y Uruguay
-(Globales y Unidad Indexada). Permite ingresar precio o yield para obtener
-la valuacion completa (precio limpio/sucio, interes corrido, YTM, duration,
-convexidad) y los cashflows futuros.
+App de Streamlit para pricear bonos soberanos (Paraguay Globales/Reg S,
+Uruguay Globales y Unidad Indexada). Toda la matematica del bono (precio,
+yield, duration, convexidad, paridad) vive en bond_model.py; este archivo
+solo arma la interfaz y traduce lo que el usuario tipea en pantalla a
+llamadas a esa libreria.
+
+Como esta organizado el archivo (de arriba hacia abajo):
+    1. Configuracion general: paises, colores, decimales, settlement.
+    2. CSS: la identidad visual (paleta por pais, mayusculas, fuente).
+    3. Funciones auxiliares: cargar/guardar el universo de bonos, armar un
+       objeto Bond a partir de una fila de la tabla, filtrar por categoria.
+    4. Tres tabs, cada uno una seccion independiente:
+         - Cashflows: ver el calendario de pagos futuros de un bono.
+         - YAS (estilo Bloomberg): pricear UN bono a la vez, precio<->yield.
+         - Monitor de bonos: editar el universo completo y comparar todos
+           los bonos juntos con precios/yields bid y offer.
+
+Nota sobre Streamlit para quien no lo conozca: Streamlit no funciona como
+una pagina web tradicional. Cada vez que el usuario toca un control (tipea
+un numero, mueve un radio button, edita una celda), Streamlit vuelve a
+correr TODO el archivo de arriba a abajo. Por eso usamos `st.session_state`
+para que ciertos valores (como los precios bid/offer que el usuario va
+editando) sobrevivan entre una corrida y la siguiente, en vez de perderse.
 
 Uso:
     streamlit run bonos_pyg_app.py
@@ -18,41 +37,73 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 
+# Streamlit Cloud a veces ejecuta el script con un directorio de trabajo
+# distinto al de este archivo, y ahi el "from bond_model import Bond" de
+# abajo fallaria (no encontraria el modulo). Agregar a mano la carpeta de
+# este archivo al sys.path lo soluciona sin importar desde donde se lance.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from bond_model import Bond
 
-DEC = 3  # decimales estandar en toda la app
-SETTLEMENT_DEFAULT = date.today() + timedelta(days=1)  # T+1
 
+# =============================================================================
+# 1) CONFIGURACION GENERAL
+# =============================================================================
+
+DEC = 3  # cantidad de decimales que se muestran en TODA la app (precios, yields, etc.)
+
+# T+1: la fecha de liquidacion por defecto es "mañana". Estos bonos se
+# operan asi habitualmente, asi que evita que el usuario tenga que
+# cambiar la fecha cada vez que abre la app.
+SETTLEMENT_DEFAULT = date.today() + timedelta(days=1)
+
+# Un diccionario por pais con todo lo que cambia entre uno y otro: de que
+# archivo CSV sale el universo de bonos, y la paleta de colores (basada en
+# la bandera de cada pais) que se usa en el CSS de mas abajo.
 PAISES = {
     "Paraguay": {
         "registry": os.path.join(BASE_DIR, "bonos_universo_py.csv"),
-        "primary": "#0038A8",
-        "accent": "#D52B1E",
+        "primary": "#0038A8",   # azul de la bandera paraguaya
+        "accent": "#D52B1E",    # rojo de la bandera paraguaya
         "flag": ["#0038A8", "#F5F6F7", "#D52B1E"],
-        "moneda": "PYG",
+        "moneda": "PYG",        # guarani
     },
     "Uruguay": {
         "registry": os.path.join(BASE_DIR, "bonos_universo_uy.csv"),
-        "primary": "#75AADB",
-        "accent": "#FCD116",
+        "primary": "#75AADB",   # celeste de la bandera uruguaya
+        "accent": "#FCD116",    # dorado del sol de mayo
         "flag": ["#75AADB", "#F5F6F7", "#75AADB"],
-        "moneda": "UYU",
+        "moneda": "UYU",        # peso uruguayo
     },
 }
 
 st.set_page_config(page_title="Monitor de Bonos Soberanos", layout="wide")
 
+# Selector de pais: es lo primero que se dibuja en la pagina. Determina que
+# archivo CSV se carga y que paleta de colores se usa mas abajo.
 pais = st.radio("País", list(PAISES.keys()), horizontal=True, key="pais_selector")
 cfg = PAISES[pais]
 PRIMARY = cfg["primary"]
 ACCENT = cfg["accent"]
 MONEDA = cfg["moneda"]
 
-# ── Identidad visual: mayusculas en toda la interfaz, paleta por pais ────────
+
+# =============================================================================
+# 2) CSS: identidad visual (paleta por pais + todo en mayusculas)
+# =============================================================================
+# Streamlit no permite cambiar la tipografia/colores de los titulos, tabs,
+# labels, etc. desde Python "normal" - hay que inyectar CSS a mano con
+# st.markdown(..., unsafe_allow_html=True). Esto es lo unico "raro" de
+# leer en el archivo; el resto es Python comun.
+#
+# OJO: las tablas editables (st.data_editor / st.dataframe mas abajo) se
+# dibujan con un componente que renderiza en un <canvas>, no con HTML
+# normal. Por eso el CSS de aca ABAJO no les cambia el texto de los
+# encabezados de columna a mayuscula - eso se resuelve escribiendo el
+# nombre de columna ya en mayuscula directamente en el column_config de
+# cada tabla (lo vas a ver mas abajo, ej. "NOMBRE", "ISIN", etc.).
 st.markdown(
     f"""
     <style>
@@ -60,12 +111,15 @@ st.markdown(
     html, body, [class*="css"] {{
         font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
     }}
+    /* Todo el texto "de interfaz" (titulos, labels, tabs, botones, captions)
+       se muestra en mayuscula, aunque en el codigo este escrito normal. */
     h1, h2, h3, h4, label, .stTabs button p, .stButton button p,
     .stDownloadButton button p, [data-testid="stCaptionContainer"],
     [data-testid="stMetricLabel"], .yas-label, .stRadio label p {{
         text-transform: uppercase !important;
     }}
     h1, h2, h3 {{ color: #F5F6F7 !important; font-weight: 600; letter-spacing: 0.2px; }}
+    /* Franja de 3 colores (bandera del pais elegido) debajo del titulo */
     .flagbar {{
         display: flex; height: 5px; width: 100%; margin: 4px 0 20px 0; border-radius: 2px;
         overflow: hidden;
@@ -85,6 +139,7 @@ st.markdown(
         border-bottom: 2px solid {PRIMARY};
     }}
     div[data-testid="stDataFrame"] {{ border: 1px solid #262B33; border-radius: 4px; }}
+    /* .yas-label / .yas-value: los "cuadraditos" de numeros grandes de la tab YAS */
     .yas-label {{ color: #8A8F98; font-size: 0.8rem; letter-spacing: 0.4px; }}
     .yas-value {{
         color: {PRIMARY}; font-size: 1.5rem; font-weight: 700;
@@ -105,21 +160,35 @@ st.caption("Bonos bullet, cupón fijo semestral, convención de días 30/360")
 REGISTRY_PATH = cfg["registry"]
 
 
-# ── Universo de bonos (editable, persistido en CSV) ─────────────────────────
+# =============================================================================
+# 3) FUNCIONES AUXILIARES
+# =============================================================================
+# Estas funciones las usan las tres tabs; por eso estan definidas antes,
+# a nivel de modulo, en vez de repetir la logica adentro de cada tab.
+
 def load_registry() -> pd.DataFrame:
+    """Lee el universo de bonos del pais elegido desde su CSV.
+
+    Cada fila del CSV es un bono con: nombre, isin, codigo (ticker corto),
+    categoria (Global/UI), coupon_pct, maturity, face y freq. Este es el
+    "maestro" de bonos disponibles en toda la app.
+    """
     df = pd.read_csv(REGISTRY_PATH)
     df["maturity"] = pd.to_datetime(df["maturity"]).dt.date
-    df["isin"] = df["isin"].fillna("")
+    df["isin"] = df["isin"].fillna("")  # Uruguay todavia no tiene ISIN cargado
     return df
 
 
 def save_registry(df: pd.DataFrame) -> None:
+    """Persiste el universo editado de vuelta al CSV (lo pisa entero)."""
     out = df.copy()
     out["maturity"] = pd.to_datetime(out["maturity"]).dt.strftime("%Y-%m-%d")
     out.to_csv(REGISTRY_PATH, index=False)
 
 
 def make_bond(row: pd.Series) -> Bond:
+    """Convierte una fila del universo (del CSV o de una tabla editada) en
+    un objeto Bond de bond_model.py, listo para pedirle precio/yield/etc."""
     maturity = row["maturity"]
     if not isinstance(maturity, date):
         maturity = pd.to_datetime(maturity).date()
@@ -132,7 +201,11 @@ def make_bond(row: pd.Series) -> Bond:
 
 
 def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
-    """Si hay mas de una categoria (ej. Uruguay: Global / UI), permite filtrar."""
+    """Si el universo tiene mas de una 'categoria' (Uruguay separa sus
+    bonos en Global y UI), muestra un filtro para elegir cual mirar. Para
+    Paraguay, que solo tiene una categoria, esto no dibuja nada y devuelve
+    el dataframe entero sin tocar.
+    """
     if "categoria" in df.columns and df["categoria"].nunique() > 1:
         categorias = ["Todas"] + sorted(df["categoria"].unique().tolist())
         elegida = st.radio("Categoría", categorias, horizontal=True, key=key)
@@ -150,7 +223,12 @@ if registry.empty:
 tab_cashflow, tab_yas, tab_monitor = st.tabs(["Cashflows", "YAS", "Monitor de bonos"])
 
 
-# ── Tab 1: Cashflows ─────────────────────────────────────────────────────────
+# =============================================================================
+# TAB 1: CASHFLOWS
+# =============================================================================
+# La mas simple de las tres: elegis un bono y una fecha de liquidacion, y
+# te muestra el calendario completo de pagos futuros (cupones + capital).
+# No depende de ningun precio/yield, solo de la fecha.
 with tab_cashflow:
     registry_cf = filtrar_por_categoria(registry, key="cat_cf")
 
@@ -163,6 +241,8 @@ with tab_cashflow:
     row_cf = registry_cf[registry_cf["nombre"] == nombre_cf].iloc[0]
     bond_cf = make_bond(row_cf)
 
+    # schedule() ubica la fecha de settlement dentro del calendario de
+    # cupones: cual fue el ultimo pagado, cual es el proximo, etc.
     prev_coupon, next_coupon, _, period_days, accrued_days, _ = bond_cf.schedule(settlement_cf)
     accrued = bond_cf.accrued_interest(settlement_cf)
 
@@ -173,6 +253,9 @@ with tab_cashflow:
 
     st.subheader("Cashflows futuros")
     cf = bond_cf.cashflows(settlement_cf)
+    # .rename(columns=str.upper): a diferencia de las tablas EDITABLES de
+    # mas abajo, esta es de solo lectura (st.dataframe), asi que alcanza
+    # con renombrar las columnas del propio DataFrame a mayuscula.
     st.dataframe(cf.rename(columns=str.upper), use_container_width=True, hide_index=True)
     st.download_button(
         "Descargar cashflows (CSV)",
@@ -182,7 +265,13 @@ with tab_cashflow:
     )
 
 
-# ── Tab 2: Valoracion estilo YAS (Bloomberg) ────────────────────────────────
+# =============================================================================
+# TAB 2: VALORACION ESTILO YAS (como la pantalla YAS de Bloomberg)
+# =============================================================================
+# Pricea UN bono a la vez: le das precio limpio O yield, y calcula todo lo
+# demas (el otro de los dos, precio sucio, interes corrido, duration,
+# convexidad). Ademas, al final, convierte el precio a moneda local usando
+# un tipo de cambio que el usuario tipea.
 with tab_yas:
     registry_yas = filtrar_por_categoria(registry, key="cat_yas")
 
@@ -195,6 +284,8 @@ with tab_yas:
         st.caption(f"ISIN: {isin_txt}  |  Cupón: {row_sel['coupon_pct']}%  |  Vto: {row_sel['maturity']}")
 
         settlement = st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="yas_settlement")
+        # "Yield" va primero en la lista (y por lo tanto es la opcion por
+        # defecto) porque estos bonos se operan/cotizan en tasa, no en precio.
         modo = st.radio("Ingresar por", ["Yield (YTM %)", "Precio limpio"], key="yas_modo")
 
         if modo == "Precio limpio":
@@ -207,6 +298,8 @@ with tab_yas:
             summary = bond.summary(settlement, ytm_pct=ytm_in)
 
     with col_grid:
+        # summary es el diccionario que devuelve Bond.summary() en
+        # bond_model.py: ya viene con todo calculado y redondeado.
         st.markdown("#### Resultado")
         g1, g2 = st.columns(2)
         with g1:
@@ -230,6 +323,9 @@ with tab_yas:
 
     st.divider()
     st.markdown("#### Conversión de moneda")
+    # Estos bonos cotizan en USD (precio_sucio esta en USD por 100 nominal).
+    # Aca dejamos tipear un tipo de cambio USD/PYG o USD/UYU (segun el
+    # pais elegido arriba) para ver a cuanto equivale en moneda local.
     col_fx_in, col_fx_out = st.columns(2)
     with col_fx_in:
         tipo_cambio = st.number_input(
@@ -250,8 +346,11 @@ with tab_yas:
             st.caption(f"Ingresá el tipo de cambio USD/{MONEDA} para ver el equivalente en moneda local.")
 
 
-# ── Tab 3: Monitor de bonos (universo + comparacion) ────────────────────────
+# =============================================================================
+# TAB 3: MONITOR DE BONOS (universo editable + comparacion bid/offer)
+# =============================================================================
 with tab_monitor:
+    # --- 3a) Universo de bonos: agregar/editar/borrar filas, y guardar al CSV ---
     st.subheader("Universo de bonos")
     st.caption(
         "Agrega, edita o elimina bonos. Verificá cupón/vencimiento/ISIN/categoría contra el "
@@ -260,8 +359,10 @@ with tab_monitor:
 
     edited = st.data_editor(
         registry,
-        num_rows="dynamic",
+        num_rows="dynamic",  # permite agregar/borrar filas, no solo editar valores
         use_container_width=True,
+        # Los "labels" de column_config van directo en mayuscula (ver nota
+        # de la seccion de CSS: estas tablas no se pueden estilar con CSS).
         column_config={
             "nombre": st.column_config.TextColumn("NOMBRE", required=True),
             "isin": st.column_config.TextColumn("ISIN"),
@@ -284,12 +385,18 @@ with tab_monitor:
         st.warning("Agrega al menos un bono para ver la comparación.")
         st.stop()
 
+    # --- 3b) Comparacion rapida: precios/yields bid y offer de todo el universo ---
     st.divider()
     st.subheader("Comparación rápida")
     st.caption("Editá precio o yield (bid/offer) directo en la tabla y mirá el resto de los campos calculados.")
 
     monitor_universe = filtrar_por_categoria(edited, key="cat_monitor")
 
+    # st.session_state guarda estos diccionarios {nombre_del_bono: valor}
+    # entre una corrida del script y la siguiente. Sin esto, cada vez que
+    # el usuario editara una celda, Streamlit volveria a correr el
+    # archivo entero y perderiamos lo que habia tipeado antes en las
+    # demas filas/columnas.
     px_bid_key = f"mesa_px_bid_{pais}"
     px_offer_key = f"mesa_px_offer_{pais}"
     yld_bid_key = f"mesa_yield_bid_{pais}"
@@ -299,12 +406,16 @@ with tab_monitor:
 
     col_modo, col_settle = st.columns([1, 1])
     with col_modo:
+        # "Yield" primero: estos bonos se pricean en tasa por convencion de mercado.
         modo_mesa = st.radio("Ingresar por", ["Yield", "Precio"], horizontal=True, key="mesa_modo")
     with col_settle:
         mesa_settlement = st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
 
-    # Semilla: yield bid/offer por defecto, precio derivado del mismo bono (no un
-    # numero independiente) para que ambos lados arranquen consistentes entre si.
+    # Semilla (solo la primera vez que aparece un bono nuevo en la sesion):
+    # arrancamos con yield bid 6.50% / offer 6.30%, y calculamos el PRECIO
+    # que le corresponde a CADA bono a partir de ese yield (en vez de
+    # inventar un precio fijo como 99.5/100.5 que no tendria relacion real
+    # con el yield semilla de ese bono en particular).
     for n in monitor_universe["nombre"]:
         if n not in st.session_state[yld_bid_key]:
             bono_seed = monitor_universe[monitor_universe["nombre"] == n].iloc[0]
@@ -314,6 +425,10 @@ with tab_monitor:
             st.session_state[px_bid_key][n] = b_seed.clean_price(6.50, mesa_settlement)
             st.session_state[px_offer_key][n] = b_seed.clean_price(6.30, mesa_settlement)
 
+    # Armamos la tabla a mostrar leyendo los valores actuales de
+    # session_state (lo ultimo que el usuario edito, o la semilla si es
+    # la primera vez) y calculando en el momento duration/paridad sobre
+    # el precio medio (mid) entre bid y offer.
     tabla_rows = []
     for _, row in monitor_universe.iterrows():
         n = row["nombre"]
@@ -336,7 +451,7 @@ with tab_monitor:
             "yield_offer": round(yield_offer, DEC),
             "px_bid": round(px_bid, DEC),
             "px_offer": round(px_offer, DEC),
-            "spread_bid_offer_bps": round((yield_bid - yield_offer) * 100, DEC),
+            "spread_bid_offer_bps": round((yield_bid - yield_offer) * 100, DEC),  # *100: de % a bps
             "maturity": row["maturity"],
             "cupon_pct": row["coupon_pct"],
             "duracion_modificada": round(s_mid["duracion_modificada"], DEC),
@@ -344,6 +459,9 @@ with tab_monitor:
         })
     tabla_df = pd.DataFrame(tabla_rows)
 
+    # Segun el modo elegido, solo dos columnas quedan editables (precio o
+    # yield, bid y offer); el resto se deshabilita porque son "salida"
+    # calculada, no algo que el usuario deba tipear.
     columnas_orden = ["nombre", "isin", "codigo", "yield_bid", "yield_offer", "px_bid", "px_offer",
                       "spread_bid_offer_bps", "maturity", "cupon_pct", "duracion_modificada", "paridad"]
     campos_fijos = ["nombre", "isin", "codigo", "spread_bid_offer_bps", "maturity", "cupon_pct",
@@ -375,6 +493,10 @@ with tab_monitor:
         key=f"tabla_editor_{pais}_{modo_mesa}",
     )
 
+    # Despues de mostrar la tabla, procesamos lo que el usuario acaba de
+    # editar: si edito precio, recalculamos el yield correspondiente (y
+    # viceversa), y guardamos AMBOS lados en session_state para que la
+    # proxima corrida del script ya muestre todo consistente entre si.
     for _, row in tabla_edited.iterrows():
         n = row["nombre"]
         bono_row = edited[edited["nombre"] == n].iloc[0]
