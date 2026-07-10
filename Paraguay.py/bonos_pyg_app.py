@@ -60,6 +60,11 @@ LAST_YIELDS_PATH = os.path.join(BASE_DIR, "yas_ultimos_yields.json")
 # aparecen aca se tratan como bullet puro (sin calls).
 CALLS_PATH = os.path.join(BASE_DIR, "bonos_calls.csv")
 
+# Cronograma de amortizacion (pago de capital en cuotas antes del
+# vencimiento) por bono, tambien compartido entre paises. Bonos que no
+# aparecen aca pagan el 100% del capital de golpe al vencimiento.
+AMORTIZACION_PATH = os.path.join(BASE_DIR, "bonos_amortizacion.csv")
+
 
 # =============================================================================
 # 1) CONFIGURACION GENERAL
@@ -270,11 +275,32 @@ def load_calls() -> dict:
 CALLS = load_calls()  # se lee una sola vez al arrancar la app
 
 
+def load_amortization() -> dict:
+    """Lee bonos_amortizacion.csv y arma {nombre_del_bono: [(fecha, fraccion), ...]}.
+
+    Si el archivo no existe (o un bono no aparece en el), ese bono se
+    trata como bullet (paga el 100% del capital al vencimiento) - ver
+    Bond.amortization en bond_model.py.
+    """
+    if not os.path.exists(AMORTIZACION_PATH):
+        return {}
+    df = pd.read_csv(AMORTIZACION_PATH)
+    df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
+    amort: dict = {}
+    for _, row in df.iterrows():
+        amort.setdefault(row["nombre"], []).append((row["fecha"], float(row["fraccion"])))
+    return amort
+
+
+AMORTIZACION = load_amortization()  # se lee una sola vez al arrancar la app
+
+
 def make_bond(row: pd.Series) -> Bond:
     """Convierte una fila del universo (del CSV o de una tabla editada) en
     un objeto Bond de bond_model.py, listo para pedirle precio/yield/etc.
-    Si el bono tiene calls cargados en bonos_calls.csv, se los pasa para
-    que el motor calcule yield/precio "to worst" en vez de a vencimiento."""
+    Si el bono tiene calls (bonos_calls.csv) o amortizacion
+    (bonos_amortizacion.csv) cargados, se los pasa para que el motor
+    calcule todo correctamente en vez de asumir un bullet puro."""
     maturity = row["maturity"]
     if not isinstance(maturity, date):
         maturity = pd.to_datetime(maturity).date()
@@ -284,6 +310,7 @@ def make_bond(row: pd.Series) -> Bond:
         face=float(row["face"]),
         freq=int(row["freq"]),
         calls=CALLS.get(row["nombre"], []),
+        amortization=AMORTIZACION.get(row["nombre"], []),
     )
 
 

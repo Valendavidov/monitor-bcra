@@ -16,6 +16,12 @@ Conceptos clave para orientarse en el archivo:
 - CALL (rescate anticipado): el emisor puede optar por devolver el
   capital antes del vencimiento normal, en una fecha y a un precio
   pactados de antemano. Un bono puede tener 0, 1 o varias fechas de call.
+- AMORTIZACION: algunos bonos (ej. los "UI" de Uruguay) no devuelven el
+  100% del capital de golpe al vencimiento - lo van pagando de a partes
+  en fechas pactadas de antemano (normalmente los ultimos años de vida
+  del bono). Cada pago de amortizacion reduce el capital vigente
+  ("outstanding"), y los cupones siguientes se calculan sobre ESE
+  capital ya reducido, no sobre el capital original.
 - YIELD/PRECIO "TO WORST": cuando un bono tiene calls, no hay un unico
   "yield" - depende de si el emisor termina ejerciendo el call o no. La
   convencion de mercado es calcular TODOS los escenarios posibles
@@ -104,6 +110,10 @@ class Bond:
         calls:      lista opcional de (fecha_call, precio_call) - fechas
                     en las que el emisor puede rescatar el bono antes del
                     vencimiento, y a que precio. Vacia si es bullet puro.
+        amortization: lista opcional de (fecha, fraccion) - fechas en las
+                    que se repaga una fraccion del capital ORIGINAL (ej.
+                    1/3 en cada una de 3 cuotas). Vacia si no amortiza
+                    (paga el 100% del capital de golpe al vencimiento).
     """
 
     coupon_pct: float
@@ -111,6 +121,7 @@ class Bond:
     face: float = 100.0
     freq: int = 2
     calls: list = field(default_factory=list)
+    amortization: list = field(default_factory=list)
 
     @property
     def redemption_scenarios(self) -> list[tuple[date, float]]:
@@ -118,6 +129,15 @@ class Bond:
         normal (maturity, face) mas cada call cargado. Se usan para
         calcular yield/precio "to worst" (ver docstring del modulo)."""
         return [(self.maturity, self.face)] + list(self.calls)
+
+    def _outstanding_at(self, d: date) -> float:
+        """Capital vigente (sobre el face original) despues de aplicar
+        cualquier amortizacion con fecha <= d. Sin amortizacion, siempre
+        es self.face (el capital nunca baja antes del vencimiento)."""
+        if not self.amortization:
+            return self.face
+        pagado = sum(frac for (fecha, frac) in self.amortization if fecha <= d)
+        return self.face * (1 - pagado)
 
     def coupon_dates(self, settlement: date) -> list[date]:
         """Reconstruye el calendario de pagos de cupon.
@@ -182,14 +202,42 @@ class Bond:
         El redondeo a 3 decimales es cosa de la interfaz (bonos_pyg_app.py),
         no del motor de calculo.
         """
+        prev_coupon, _, future, _, _, f = self.schedule(settlement)
+
+        # Caso bono amortizante: se activa tanto si no se paso ningun
+        # escenario de redencion (redemption_date=None) COMO si el que se
+        # paso es simplemente el vencimiento normal (asi lo llaman
+        # price_to_worst/yield_to_worst para el escenario "sin call") -
+        # en ninguno de los dos casos hay un call de por medio, asi que
+        # corresponde respetar la amortizacion. Los bonos con call en
+        # esta app no amortizan, asi que no hace falta combinar ambas
+        # cosas para una fecha que sea a la vez call Y amortizante.
+        if redemption_date in (None, self.maturity) and self.amortization:
+            outstanding = self._outstanding_at(prev_coupon)
+            rows = []
+            for i, d in enumerate(future):
+                t = f + i
+                coupon_amt = self.coupon_pct / 100 / self.freq * outstanding
+                amort_frac = next((frac for (fecha, frac) in self.amortization if fecha == d), 0.0)
+                principal = self.face * amort_frac
+                rows.append({
+                    "fecha": d,
+                    "dias_desde_settlement_30_360": days_30_360(settlement, d),
+                    "periodos_semestrales": t,
+                    "cupon": coupon_amt,
+                    "principal": principal,
+                    "flujo_total": coupon_amt + principal,
+                })
+                outstanding -= principal  # el capital que queda paga los cupones siguientes
+            return pd.DataFrame(rows)
+
         if redemption_date is None:
             redemption_date, redemption_price = self.maturity, self.face
 
-        _, _, future, _, _, f = self.schedule(settlement)
         coupon_amt = self.coupon_pct / 100 / self.freq * self.face
         period_nominal = 360 / self.freq
         rows = []
-        last_date, last_t = self.schedule(settlement)[0], f - 1
+        last_date, last_t = prev_coupon, f - 1
         for i, d in enumerate(future):
             t = f + i
             if d < redemption_date:
@@ -236,9 +284,13 @@ class Bond:
         todavia no pagada, proporcional a los dias transcurridos desde el
         ultimo cupon. Esto es lo que se le suma al precio limpio para
         llegar al precio sucio (lo que realmente se paga). No depende de
-        si el bono termina en un call o en el vencimiento normal."""
-        _, _, _, period_days, accrued_days, _ = self.schedule(settlement)
-        coupon_amt = self.coupon_pct / 100 / self.freq * self.face
+        si el bono termina en un call o en el vencimiento normal. Si el
+        bono amortiza, el cupon corriente se calcula sobre el capital
+        vigente en ESE periodo (ya reducido por amortizaciones previas),
+        no sobre el capital original."""
+        prev_coupon, _, _, period_days, accrued_days, _ = self.schedule(settlement)
+        outstanding = self._outstanding_at(prev_coupon)
+        coupon_amt = self.coupon_pct / 100 / self.freq * outstanding
         return coupon_amt * accrued_days / period_days
 
     def dirty_price(self, ytm_pct: float, settlement: date, redemption_date: date = None,
@@ -260,13 +312,17 @@ class Bond:
     def paridad(self, clean_price: float, settlement: date) -> float:
         """Paridad = precio sucio / valor tecnico, en %.
 
-        El "valor tecnico" es el capital vigente (face) mas el interes
-        corrido: es cuanto "deberia" valer el bono en libros en ese
-        instante, sin considerar mercado. Paridad > 100% = el mercado lo
-        paga por encima de su valor tecnico; < 100% = por debajo.
+        El "valor tecnico" es el capital vigente mas el interes corrido:
+        es cuanto "deberia" valer el bono en libros en ese instante, sin
+        considerar mercado. Si el bono ya amortizo parte del capital, el
+        valor tecnico usa lo que queda vigente, no el capital original.
+        Paridad > 100% = el mercado lo paga por encima de su valor
+        tecnico; < 100% = por debajo.
         """
+        prev_coupon, _, _, _, _, _ = self.schedule(settlement)
+        outstanding = self._outstanding_at(prev_coupon)
         accrued = self.accrued_interest(settlement)
-        valor_tecnico = self.face + accrued
+        valor_tecnico = outstanding + accrued
         dirty = clean_price + accrued
         return dirty / valor_tecnico * 100
 
