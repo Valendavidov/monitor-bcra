@@ -348,6 +348,9 @@ with tab_yas:
             st.markdown(f'<div class="yas-value">{summary["precio_sucio"]:.{DEC}f}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">INTERÉS CORRIDO</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{summary["interes_corrido"]:.{DEC}f}</div>', unsafe_allow_html=True)
+            paridad_val = bond.paridad(summary["precio_limpio"], settlement)
+            st.markdown('<div class="yas-label">PARIDAD</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{paridad_val:.{DEC}f}</div>', unsafe_allow_html=True)
         with g2:
             st.markdown('<div class="yas-label">DURACIÓN MACAULAY (AÑOS)</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{summary["duracion_macaulay_anios"]:.{DEC}f}</div>', unsafe_allow_html=True)
@@ -360,27 +363,71 @@ with tab_yas:
 
     st.divider()
     st.markdown("#### Conversión de moneda")
-    # Estos bonos cotizan en USD (precio_sucio esta en USD por 100 nominal).
-    # Aca dejamos tipear un tipo de cambio USD/PYG o USD/UYU (segun el
-    # pais elegido arriba) para ver a cuanto equivale en moneda local.
-    col_fx_in, col_fx_out = st.columns(2)
-    with col_fx_in:
+    st.caption(
+        f"Ingresá nominales (valor nominal en USD) o un monto en {MONEDA}, más el tipo de "
+        "cambio, y calcula lo que falta (incluido el equivalente en USD)."
+    )
+
+    # precio_sucio esta cotizado en USD por cada 100 de nominal (valor
+    # nominal / face). "Nominales" es cuanto valor nominal en USD tenes o
+    # queres comprar (ej. 10.000 = USD 10.000 de nominal, no 10.000 bonos).
+    modo_fx = st.radio(
+        "Ingresar por", ["Nominales (USD)", f"Monto en {MONEDA}"],
+        horizontal=True, key="yas_fx_modo",
+    )
+
+    col_fx1, col_fx2 = st.columns(2)
+    with col_fx2:
         tipo_cambio = st.number_input(
             f"Tipo de cambio (USD/{MONEDA})", min_value=0.0, value=0.0, step=1.0,
             format="%.4f", key="yas_fx",
         )
-    if tipo_cambio > 0:
-        monto_local = summary["precio_sucio"] * tipo_cambio
-        with col_fx_out:
-            st.markdown(f'<div class="yas-label">EQUIVALENTE EN {MONEDA} (POR 100 NOMINAL)</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{monto_local:,.{DEC}f}</div>', unsafe_allow_html=True)
-        st.caption(
-            f"Precio sucio (USD 100 nominal) × tipo de cambio ingresado = {MONEDA}. "
-            + ("La UI tiene su propio factor de conversión oficial contra el UYU; esto es una aproximación con el tipo de cambio ingresado, no lo reemplaza." if row_sel.get("categoria") == "UI" else "")
-        )
+
+    usd_consideracion = None
+    nominales = None
+    monto_local = None
+
+    if modo_fx == "Nominales (USD)":
+        with col_fx1:
+            nominales = st.number_input(
+                "Nominales (valor nominal, USD)", min_value=0.0, value=100.0, step=100.0,
+                format=f"%.{DEC}f", key="yas_nominales",
+            )
+        # precio_sucio/100 = cuanto USD cuesta cada USD 1 de nominal.
+        usd_consideracion = summary["precio_sucio"] / 100 * nominales
+        if tipo_cambio > 0:
+            monto_local = usd_consideracion * tipo_cambio
     else:
-        with col_fx_out:
-            st.caption(f"Ingresá el tipo de cambio USD/{MONEDA} para ver el equivalente en moneda local.")
+        with col_fx1:
+            monto_local = st.number_input(
+                f"Monto en {MONEDA}", min_value=0.0, value=0.0, step=1000.0,
+                format=f"%.{DEC}f", key="yas_monto_local",
+            )
+        if tipo_cambio > 0:
+            usd_consideracion = monto_local / tipo_cambio
+            nominales = usd_consideracion / (summary["precio_sucio"] / 100)
+
+    def _valor_o_guion(v):
+        return f"{v:,.{DEC}f}" if v is not None else "—"
+
+    g_fx1, g_fx2, g_fx3 = st.columns(3)
+    with g_fx1:
+        st.markdown('<div class="yas-label">NOMINALES (USD)</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="yas-value">{_valor_o_guion(nominales)}</div>', unsafe_allow_html=True)
+    with g_fx2:
+        st.markdown(f'<div class="yas-label">MONTO EN {MONEDA}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="yas-value">{_valor_o_guion(monto_local)}</div>', unsafe_allow_html=True)
+    with g_fx3:
+        st.markdown('<div class="yas-label">USD (CONSIDERACIÓN)</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="yas-value">{_valor_o_guion(usd_consideracion)}</div>', unsafe_allow_html=True)
+
+    if tipo_cambio <= 0:
+        st.caption(f"Ingresá el tipo de cambio USD/{MONEDA} para completar la conversión.")
+    elif row_sel.get("categoria") == "UI":
+        st.caption(
+            "La UI tiene su propio factor de conversión oficial contra el UYU; esto es una "
+            "aproximación con el tipo de cambio ingresado, no lo reemplaza."
+        )
 
 
 # =============================================================================
