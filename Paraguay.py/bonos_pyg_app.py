@@ -62,10 +62,26 @@ LAST_YIELDS_PATH = os.path.join(BASE_DIR, "yas_ultimos_yields.json")
 
 DEC = 3  # cantidad de decimales que se muestran en TODA la app (precios, yields, etc.)
 
-# T+1: la fecha de liquidacion por defecto es "mañana". Estos bonos se
-# operan asi habitualmente, asi que evita que el usuario tenga que
-# cambiar la fecha cada vez que abre la app.
-SETTLEMENT_DEFAULT = date.today() + timedelta(days=1)
+
+def siguiente_dia_habil(d: date) -> date:
+    """Si `d` cae sabado o domingo, la corre al lunes siguiente.
+
+    Nota: solo evita fines de semana, no feriados de Paraguay/Uruguay
+    (no tenemos cargado un calendario de feriados). El settlement de
+    estos bonos tiene que ser un dia habil, asi que la app nunca deja
+    calcular con un sabado/domingo - si se elige uno, se usa este
+    "proximo dia habil" automaticamente.
+    """
+    while d.weekday() >= 5:  # 5 = sabado, 6 = domingo
+        d += timedelta(days=1)
+    return d
+
+
+# T+1: la fecha de liquidacion por defecto es "mañana" (y si mañana cae
+# fin de semana, el proximo dia habil). Estos bonos se operan asi
+# habitualmente, asi que evita que el usuario tenga que cambiar la fecha
+# cada vez que abre la app.
+SETTLEMENT_DEFAULT = siguiente_dia_habil(date.today() + timedelta(days=1))
 
 
 def fmt_es(x: float, decimales: int = DEC) -> str:
@@ -281,6 +297,10 @@ with tab_cashflow:
         nombre_cf = st.selectbox("Bono", registry_cf["nombre"].tolist(), key="cf_bono")
     with col_settle:
         settlement_cf = st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="cf_settlement")
+    if settlement_cf.weekday() >= 5:
+        settlement_cf_habil = siguiente_dia_habil(settlement_cf)
+        st.warning(f"{settlement_cf} es fin de semana. Se usa el próximo día hábil: {settlement_cf_habil}.")
+        settlement_cf = settlement_cf_habil
 
     row_cf = registry_cf[registry_cf["nombre"] == nombre_cf].iloc[0]
     bond_cf = make_bond(row_cf)
@@ -332,6 +352,10 @@ with tab_yas:
         st.caption(f"ISIN: {isin_txt}  |  Cupón: {row_sel['coupon_pct']}%  |  Vto: {row_sel['maturity']}")
 
         settlement = st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="yas_settlement")
+        if settlement.weekday() >= 5:
+            settlement_habil = siguiente_dia_habil(settlement)
+            st.warning(f"{settlement} es fin de semana. Se usa el próximo día hábil: {settlement_habil}.")
+            settlement = settlement_habil
         # "Yield" va primero en la lista (y por lo tanto es la opcion por
         # defecto) porque estos bonos se operan/cotizan en tasa, no en precio.
         modo = st.radio("Ingresar por", ["Yield (YTM %)", "Precio limpio"], key="yas_modo")
@@ -358,6 +382,8 @@ with tab_yas:
         # summary es el diccionario que devuelve Bond.summary() en
         # bond_model.py: ya viene con todo calculado y redondeado.
         st.markdown("#### Resultado")
+        st.markdown('<div class="yas-label">ISIN</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="yas-value">{isin_txt}</div>', unsafe_allow_html=True)
         g1, g2 = st.columns(2)
         with g1:
             st.markdown('<div class="yas-label">YIELD (YTM %)</div>', unsafe_allow_html=True)
@@ -481,6 +507,10 @@ with tab_monitor:
         modo_mesa = st.radio("Ingresar por", ["Yield", "Precio"], horizontal=True, key="mesa_modo")
     with col_settle:
         mesa_settlement = st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
+    if mesa_settlement.weekday() >= 5:
+        mesa_settlement_habil = siguiente_dia_habil(mesa_settlement)
+        st.warning(f"{mesa_settlement} es fin de semana. Se usa el próximo día hábil: {mesa_settlement_habil}.")
+        mesa_settlement = mesa_settlement_habil
 
     # Semilla (solo la primera vez que aparece un bono nuevo en la sesion):
     # arrancamos con yield bid 6.50% / offer 6.30%, y calculamos el PRECIO
