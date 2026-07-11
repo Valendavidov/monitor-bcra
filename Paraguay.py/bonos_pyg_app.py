@@ -179,15 +179,14 @@ st.markdown(
         color: {PRIMARY}; font-family: "Roboto Mono", Consolas, monospace; font-weight: 600;
     }}
     [data-testid="stMetricLabel"] {{ color: #8A8F98; }}
-    .stTabs [data-baseweb="tab-list"] {{ gap: 6px; border-bottom: 1px solid #262B33; padding-bottom: 4px; }}
+    .stTabs [data-baseweb="tab-list"] {{ gap: 8px; padding-bottom: 6px; }}
     .stTabs [data-baseweb="tab"] {{
-        background-color: transparent; color: #8A8F98; border-radius: 8px;
-        padding: 8px 20px; transition: background-color 0.15s ease, color 0.15s ease;
+        background-color: #171B21; color: #8A8F98; border-radius: 999px;
+        padding: 8px 22px; transition: background-color 0.15s ease, color 0.15s ease;
     }}
-    .stTabs [data-baseweb="tab"]:hover {{ background-color: #171B21; color: #C9CDD4; }}
+    .stTabs [data-baseweb="tab"]:hover {{ background-color: #1F242C; color: #C9CDD4; }}
     .stTabs [aria-selected="true"] {{
-        background-color: #171B21; color: {PRIMARY} !important;
-        box-shadow: inset 0 0 0 1px #262B33;
+        background-color: {PRIMARY} !important; color: #F5F6F7 !important;
     }}
     div[data-testid="stDataFrame"] {{ border: 1px solid #262B33; border-radius: 4px; }}
     /* .yas-label / .yas-value: los "cuadraditos" de numeros grandes de la tab YAS */
