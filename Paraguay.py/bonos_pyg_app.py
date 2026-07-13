@@ -344,6 +344,23 @@ def make_bond(row: pd.Series) -> Bond:
     )
 
 
+def resaltar_columnas_editables(df: pd.DataFrame, columnas_solo_lectura: list):
+    """Devuelve un pandas.Styler que apaga (gris oscuro) las columnas de
+    solo lectura de una tabla, para que las que SI se pueden tipear
+    queden claras por contraste con el resto.
+
+    Streamlit deja pintar con Styler las columnas de un st.data_editor,
+    pero solo las que son de solo lectura - a las editables no se les
+    puede tocar el fondo (esta documentado asi en la propia libreria). Por
+    eso el camino es al reves: en vez de resaltar la columna editable,
+    se apagan todas las demas.
+    """
+    def _gris(_):
+        return "background-color: #171B21; color: #6B7078;"
+
+    return df.style.map(_gris, subset=columnas_solo_lectura)
+
+
 def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
     """Si el universo tiene mas de una 'categoria' (Uruguay separa sus
     bonos en Global y UI), muestra un filtro para elegir cual mirar. Para
@@ -672,8 +689,10 @@ with tab_monitor:
     else:
         disabled_cols = campos_fijos + ["px_bid", "px_offer"]
 
+    tabla_styler = resaltar_columnas_editables(tabla_df[columnas_orden], disabled_cols)
+
     tabla_edited = st.data_editor(
-        tabla_df[columnas_orden],
+        tabla_styler,
         use_container_width=True,
         hide_index=True,
         disabled=disabled_cols,
@@ -790,17 +809,7 @@ with tab_fras:
         })
     input_df = pd.DataFrame(input_rows)
 
-    # Streamlit deja pintar con pandas.Styler las columnas de un
-    # data_editor, pero SOLO las que son de solo lectura (a las editables
-    # no se les puede tocar el fondo - documentado asi por Streamlit). Por
-    # eso la manera de resaltar "yield_semianual" como la unica columna
-    # editable es al reves: apagar/grisar las otras tres, para que esa
-    # quede en contraste (mas clara/normal) y se note que es la que se
-    # puede tipear.
-    def _gris_solo_lectura(_):
-        return "background-color: #171B21; color: #6B7078;"
-
-    input_styler = input_df.style.map(_gris_solo_lectura, subset=["bono", "dias_vto", "yield_anual"])
+    input_styler = resaltar_columnas_editables(input_df, ["bono", "dias_vto", "yield_anual"])
 
     input_edited = st.data_editor(
         input_styler,
