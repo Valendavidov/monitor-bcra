@@ -841,7 +841,7 @@ with tab_fras:
         st.session_state[fras_yield_key][row["bono"]] = float(row["yield_semianual"])
 
     # A partir de aca se arma la curva de nodos que alimenta las dos
-    # matrices: "HOY" (t=0, punto de partida) mas un nodo por bono, en el
+    # matrices: un nodo por bono (bono vs bono, sin agregar "HOY"), en el
     # mismo orden (ascendente por vencimiento) que la tabla de arriba.
     nombres = curva["nombre"].tolist()
     codigos = dict(zip(curva["nombre"], curva["codigo"]))
@@ -855,30 +855,25 @@ with tab_fras:
         for n in nombres
     }
 
-    nodos = ["HOY"] + nombres
-    etiquetas = ["HOY"] + [codigos[n] for n in nombres]
-    t_por_nodo = {"HOY": 0.0, **anios_al_vto}
+    nodos = nombres
+    etiquetas = [codigos[n] for n in nombres]
+    t_por_nodo = anios_al_vto
 
     # Las tres tasas base que se pueden elegir para alimentar cada matriz.
-    # El nodo "HOY" lleva 0.0 en las tres - no importa cual valor tenga,
-    # porque con ti=0 las dos formulas de abajo lo cancelan solas.
     TASAS_BASE = {
-        "Semi Anual": {"HOY": 0.0, **yield_semi},
-        "Anual (TEA)": {"HOY": 0.0, **yield_tea},
-        "TNA": {"HOY": 0.0, **yield_tna},
+        "Semi Anual": yield_semi,
+        "Anual (TEA)": yield_tea,
+        "TNA": yield_tna,
     }
 
     def forward_compounding(ti: float, ri: float, tj: float, rj: float) -> float:
-        """a) Anual compounding: forward compuesto, con exponente en
-        años (dias/365). Con ti=0 (nodo HOY) da exactamente rj, sea cual
-        sea ri (no hace falta un caso especial para la fila/columna HOY).
-        Tasas en decimal (no %); devuelve decimal."""
+        """Anual compounding: forward compuesto, con exponente en años
+        (dias/365). Tasas en decimal (no %); devuelve decimal."""
         return ((1 + rj) ** tj / (1 + ri) ** ti) ** (1 / (tj - ti)) - 1
 
     def forward_simple(ti: float, ri: float, tj: float, rj: float) -> float:
-        """b) Simple rate: forward lineal (tipo Act/365 simple), en vez
-        de compuesto. Misma propiedad que forward_compounding respecto
-        del nodo HOY. Tasas en decimal; devuelve decimal."""
+        """Simple rate: forward lineal (tipo Act/365 simple), en vez de
+        compuesto. Tasas en decimal; devuelve decimal."""
         return ((1 + rj * tj) / (1 + ri * ti) - 1) / (tj - ti)
 
     def armar_matriz(tasas_pct: dict, formula):
@@ -950,13 +945,13 @@ with tab_fras:
         estilos = crudo.map(_color)
         st.dataframe(texto.style.apply(lambda _: estilos, axis=None), use_container_width=True)
 
-    st.markdown("#### a) Anual Compounding")
+    st.markdown("#### Anual Compounding")
     base_a = st.radio(
         "Tasa de base", list(TASAS_BASE.keys()), horizontal=True, index=0, key=f"fras_base_a_{fra_key_suffix}",
     )
     _mostrar_matriz(*armar_matriz(TASAS_BASE[base_a], forward_compounding))
 
-    st.markdown("#### b) Simple Rate")
+    st.markdown("#### Simple Rate")
     base_b = st.radio(
         "Tasa de base", list(TASAS_BASE.keys()), horizontal=True, index=2, key=f"fras_base_b_{fra_key_suffix}",
     )
