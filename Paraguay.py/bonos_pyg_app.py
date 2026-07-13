@@ -81,6 +81,7 @@ AMORTIZACION_PATH = os.path.join(BASE_DIR, "bonos_amortizacion.csv")
 # dia a dia, y Streamlit Cloud borra cualquier archivo que no este en git
 # cada vez que se hace un deploy nuevo.
 OPS_HIST_PATH = os.path.join(BASE_DIR, "ops_historicas_uy.csv")
+OPS_HIST_NDF_PATH = os.path.join(BASE_DIR, "ops_historicas_ndf_uy.csv")
 
 
 # =============================================================================
@@ -661,36 +662,44 @@ def codigo_o_descripcion(nombre_bono: str, registry_uy: pd.DataFrame) -> str:
     return fila.iloc[0]["codigo"] if not fila.empty else nombre_bono
 
 
-COLUMNAS_HIST_OPS = [
+COLUMNAS_HIST_OPS_BONOS = [
     "fecha", "entidad", "bono", "nominales_operados", "tasa_operada_pct", "usd_operados", "px_operado",
 ]
+COLUMNAS_HIST_OPS_NDF = [
+    "fecha", "instrumento", "plazo", "cantidad", "usd", "precio", "puntos", "yield_pct",
+]
+DECIMALES_HIST_OPS_BONOS = {
+    "nominales_operados": DEC, "tasa_operada_pct": DEC, "usd_operados": DEC, "px_operado": 4,
+}
+DECIMALES_HIST_OPS_NDF = {"cantidad": DEC, "usd": DEC, "precio": 4, "puntos": 4, "yield_pct": DEC}
 
 
-def cargar_historico_ops() -> pd.DataFrame:
-    """Lee el historico de Ops Historicas (Uruguay) desde OPS_HIST_PATH.
-    Si todavia no se guardo ningun dia, devuelve un DataFrame vacio con
-    las columnas correctas (para que el resto del codigo no tenga que
-    distinguir el caso "vacio" del caso "con datos")."""
-    if not os.path.exists(OPS_HIST_PATH):
-        return pd.DataFrame(columns=COLUMNAS_HIST_OPS)
-    df = pd.read_csv(OPS_HIST_PATH)
+def cargar_historico_ops(ruta: str, columnas: list) -> pd.DataFrame:
+    """Lee un historico de Ops Historicas (Uruguay) desde `ruta`. Si
+    todavia no se guardo ningun dia ahi, devuelve un DataFrame vacio con
+    `columnas` (para que el resto del codigo no tenga que distinguir el
+    caso "vacio" del caso "con datos"). Se usa tanto para el historico de
+    Bonos (OPS_HIST_PATH) como para el de NDF (OPS_HIST_NDF_PATH)."""
+    if not os.path.exists(ruta):
+        return pd.DataFrame(columns=columnas)
+    df = pd.read_csv(ruta)
     df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
     return df
 
 
-def guardar_en_historico_ops(hoy_df: pd.DataFrame) -> None:
+def guardar_en_historico_ops(hoy_df: pd.DataFrame, ruta: str, columnas: list) -> None:
     """Agrega las operaciones de HOY (con sus valores crudos, sin
-    formatear) al historico persistido en CSV. Si ya se habia guardado
-    algo para el dia de hoy (ej. se peg un reporte actualizado y se volvio
-    a apretar el boton), se reemplaza en vez de duplicar filas del mismo
-    dia."""
+    formatear) al historico persistido en `ruta`. Si ya se habia
+    guardado algo para el dia de hoy (ej. se pego un reporte actualizado
+    y se volvio a apretar el boton), se reemplaza en vez de duplicar
+    filas del mismo dia."""
     hoy = date.today()
     nuevo = hoy_df.copy()
     nuevo.insert(0, "fecha", hoy)
-    existente = cargar_historico_ops()
+    existente = cargar_historico_ops(ruta, columnas)
     existente = existente[existente["fecha"] != hoy]
     combinado = pd.concat([existente, nuevo], ignore_index=True)
-    combinado.to_csv(OPS_HIST_PATH, index=False)
+    combinado.to_csv(ruta, index=False)
 
 
 def _git(*args: str):
@@ -700,10 +709,11 @@ def _git(*args: str):
     return subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
 
 
-def sincronizar_historico_con_github() -> tuple:
-    """Hace commit + push de OPS_HIST_PATH al repo de GitHub, usando un
-    Personal Access Token guardado en st.secrets["github_token"] (con
-    permiso de escritura sobre este repo). Devuelve (ok, mensaje).
+def sincronizar_historico_con_github(ruta: str, etiqueta: str) -> tuple:
+    """Hace commit + push del archivo en `ruta` al repo de GitHub, usando
+    un Personal Access Token guardado en st.secrets["github_token"] (con
+    permiso de escritura sobre este repo). `etiqueta` es solo para el
+    mensaje del commit (ej. "Bonos" o "NDF"). Devuelve (ok, mensaje).
 
     Nunca fuerza el push: si el contenedor de Streamlit Cloud esta
     desactualizado respecto al repo (por ejemplo porque se le pidio a
@@ -721,7 +731,7 @@ def sincronizar_historico_con_github() -> tuple:
         # incluya en su propio mensaje de error (pasa con URLs con token).
         return texto.replace(token, "***") if texto else texto
 
-    ruta_relativa = os.path.relpath(OPS_HIST_PATH, REPO_ROOT)
+    ruta_relativa = os.path.relpath(ruta, REPO_ROOT)
 
     r_add = _git("add", ruta_relativa)
     if r_add.returncode != 0:
@@ -730,7 +740,7 @@ def sincronizar_historico_con_github() -> tuple:
     r_commit = _git(
         "-c", "user.name=Monitor Ops Históricas",
         "-c", "user.email=ops-historicas@monitor-bcra.local",
-        "commit", "-m", f"Actualiza histórico Ops Históricas ({date.today()})",
+        "commit", "-m", f"Actualiza histórico Ops Históricas {etiqueta} ({date.today()})",
     )
     if r_commit.returncode != 0:
         salida = (r_commit.stdout + r_commit.stderr).lower()
@@ -746,15 +756,17 @@ def sincronizar_historico_con_github() -> tuple:
     return True, "Histórico sincronizado con GitHub."
 
 
-def formatear_tabla_ops(df: pd.DataFrame) -> pd.DataFrame:
+def formatear_tabla_ops(df: pd.DataFrame, decimales: dict) -> pd.DataFrame:
     """Copia de df (tabla de Ops Historicas, cruda) con los numeros ya
     formateados (coma de miles, punto decimal - igual que el resto de la
     app) para mostrar con st.dataframe; "—" donde falta un dato (ej. no
-    se pudo calcular la tasa porque el bono no matcheo)."""
+    se pudo calcular la tasa/yield). `decimales` es {columna: cantidad de
+    decimales} - las columnas que no son numericas (bono, entidad,
+    instrumento, plazo) no aparecen ahi y quedan sin tocar."""
     out = df.copy()
-    decimales = {"nominales_operados": DEC, "tasa_operada_pct": DEC, "usd_operados": DEC, "px_operado": 4}
     for col, dec in decimales.items():
-        out[col] = out[col].apply(lambda v: fmt_es(v, decimales=dec) if pd.notna(v) else "—")
+        if col in out.columns:
+            out[col] = out[col].apply(lambda v: fmt_es(v, decimales=dec) if pd.notna(v) else "—")
     return out
 
 
@@ -1511,22 +1523,28 @@ if pais == "Uruguay":
                     st.caption('No encontré filas de NDF ("DOLAR <mes> <fecha>") en el texto pegado.')
                 else:
                     st.caption(f"Spot de referencia (fila DOLAR): {fmt_es(spot_ndf, decimales=4)}")
-                    filas_out = []
+                    filas_crudas = []
                     for f in filas_ndf:
                         dias = (f["fecha_fixing"] - fecha_ref_ndf).days
                         precio = spot_ndf + f["puntos"]
                         yld = ndf_yield_pct(spot_ndf, precio, sofr_pct_ndf, dias) if dias > 0 else None
-                        filas_out.append({
+                        # El "PLAZO" viene con ceros a la izquierda (ej.
+                        # "047"); se lo saca convirtiendo a int y de vuelta
+                        # a texto - si algun dia viniera algo no numerico,
+                        # se deja tal cual en vez de romper.
+                        plazo = str(int(f["plazo"])) if f["plazo"].strip().isdigit() else f["plazo"]
+                        filas_crudas.append({
                             "instrumento": f["instrumento"],
-                            "plazo": f["plazo"],
-                            "cantidad": fmt_es(f["cantidad"]) if f["cantidad"] is not None else "—",
-                            "usd": fmt_es(f["usd"]) if f["usd"] is not None else "—",
-                            "precio": fmt_es(precio, decimales=4),
-                            "puntos": fmt_es(f["puntos"], decimales=4),
-                            "yield_pct": fmt_es(yld) if yld is not None else "—",
+                            "plazo": plazo,
+                            "cantidad": f["cantidad"],
+                            "usd": f["usd"],
+                            "precio": precio,
+                            "puntos": f["puntos"],
+                            "yield_pct": yld,
                         })
+                    hoy_ndf_df = pd.DataFrame(filas_crudas)
                     st.dataframe(
-                        pd.DataFrame(filas_out),
+                        formatear_tabla_ops(hoy_ndf_df, DECIMALES_HIST_OPS_NDF),
                         use_container_width=True,
                         hide_index=True,
                         column_config={
@@ -1539,6 +1557,41 @@ if pais == "Uruguay":
                             "yield_pct": st.column_config.TextColumn("YIELD (%)"),
                         },
                     )
+
+                    if st.button("💾 Guardar en histórico", key="ops_ndf_guardar_historico"):
+                        guardar_en_historico_ops(hoy_ndf_df, OPS_HIST_NDF_PATH, COLUMNAS_HIST_OPS_NDF)
+                        ok_sync, mensaje_sync = sincronizar_historico_con_github(OPS_HIST_NDF_PATH, "NDF")
+                        if ok_sync:
+                            st.success(f"Guardado ({date.today()}). {mensaje_sync}")
+                        else:
+                            st.warning(
+                                f"Se guardó localmente, pero no se pudo sincronizar con GitHub: {mensaje_sync}"
+                            )
+
+            st.divider()
+            st.markdown("#### Histórico")
+            historico_ndf_df = cargar_historico_ops(OPS_HIST_NDF_PATH, COLUMNAS_HIST_OPS_NDF)
+            if historico_ndf_df.empty:
+                st.caption("Todavía no guardaste ningún día en el histórico (usá el botón de arriba).")
+            else:
+                historico_ndf_mostrado = historico_ndf_df.sort_values(
+                    ["fecha", "instrumento"], ascending=[False, True]
+                ).reset_index(drop=True)
+                st.dataframe(
+                    formatear_tabla_ops(historico_ndf_mostrado, DECIMALES_HIST_OPS_NDF),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "fecha": st.column_config.DateColumn("FECHA"),
+                        "instrumento": st.column_config.TextColumn("INSTRUMENTO"),
+                        "plazo": st.column_config.TextColumn("PLAZO"),
+                        "cantidad": st.column_config.TextColumn("CANTIDAD"),
+                        "usd": st.column_config.TextColumn("USD"),
+                        "precio": st.column_config.TextColumn("PRECIO"),
+                        "puntos": st.column_config.TextColumn("PUNTOS"),
+                        "yield_pct": st.column_config.TextColumn("YIELD (%)"),
+                    },
+                )
         else:
             col_bevsa, col_externas = st.columns(2)
             with col_bevsa:
@@ -1577,7 +1630,7 @@ if pais == "Uruguay":
                     .reset_index(drop=True)
                 )
                 st.dataframe(
-                    formatear_tabla_ops(hoy_df),
+                    formatear_tabla_ops(hoy_df, DECIMALES_HIST_OPS_BONOS),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
@@ -1591,8 +1644,8 @@ if pais == "Uruguay":
                 )
 
                 if st.button("💾 Guardar en histórico", key="ops_guardar_historico"):
-                    guardar_en_historico_ops(hoy_df)
-                    ok_sync, mensaje_sync = sincronizar_historico_con_github()
+                    guardar_en_historico_ops(hoy_df, OPS_HIST_PATH, COLUMNAS_HIST_OPS_BONOS)
+                    ok_sync, mensaje_sync = sincronizar_historico_con_github(OPS_HIST_PATH, "Bonos")
                     if ok_sync:
                         st.success(f"Guardado ({date.today()}). {mensaje_sync}")
                     else:
@@ -1602,7 +1655,7 @@ if pais == "Uruguay":
 
             st.divider()
             st.markdown("#### Histórico")
-            historico_df = cargar_historico_ops()
+            historico_df = cargar_historico_ops(OPS_HIST_PATH, COLUMNAS_HIST_OPS_BONOS)
             if historico_df.empty:
                 st.caption("Todavía no guardaste ningún día en el histórico (usá el botón de arriba).")
             else:
@@ -1610,7 +1663,7 @@ if pais == "Uruguay":
                     ["fecha", "bono", "entidad"], ascending=[False, True, True]
                 ).reset_index(drop=True)
                 st.dataframe(
-                    formatear_tabla_ops(historico_mostrado),
+                    formatear_tabla_ops(historico_mostrado, DECIMALES_HIST_OPS_BONOS),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
