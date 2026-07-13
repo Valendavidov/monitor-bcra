@@ -481,11 +481,22 @@ def _num_es(texto: str):
     coma decimal - ej. "20.000.000,00") a float. Es la fuente (BEVSA/
     Externas) la que viene en ese formato - no tiene relacion con fmt_es(),
     que es el formato de SALIDA del resto de la app (coma de miles, punto
-    decimal). Devuelve None si la celda viene vacia."""
-    texto = texto.strip().replace("%", "")
+    decimal). Devuelve None si la celda viene vacia O si no se pudo
+    convertir (ej. se pego desde otra compu/navegador con un espacio no
+    estandar, o la celda vino corrida) - una celda rara no debe tirar
+    abajo toda la tabla, mejor mostrar "—" ahi y que se note visualmente
+    en vez de que la pagina entera se rompa con un error."""
+    if texto is None:
+        return None
+    # \xa0 = espacio "duro" (non-breaking space) - algunos navegadores lo
+    # usan al copiar tablas en vez de un espacio comun.
+    texto = texto.strip().replace("\xa0", "").replace("%", "").strip()
     if not texto:
         return None
-    return float(texto.replace(".", "").replace(",", "."))
+    try:
+        return float(texto.replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
 
 
 def _fecha_es(texto: str) -> date:
@@ -1526,8 +1537,12 @@ if pais == "Uruguay":
                     filas_crudas = []
                     for f in filas_ndf:
                         dias = (f["fecha_fixing"] - fecha_ref_ndf).days
-                        precio = spot_ndf + f["puntos"]
-                        yld = ndf_yield_pct(spot_ndf, precio, sofr_pct_ndf, dias) if dias > 0 else None
+                        precio = spot_ndf + f["puntos"] if f["puntos"] is not None else None
+                        yld = (
+                            ndf_yield_pct(spot_ndf, precio, sofr_pct_ndf, dias)
+                            if precio is not None and dias > 0
+                            else None
+                        )
                         # El "PLAZO" viene con ceros a la izquierda (ej.
                         # "047"); se lo saca convirtiendo a int y de vuelta
                         # a texto - si algun dia viniera algo no numerico,
