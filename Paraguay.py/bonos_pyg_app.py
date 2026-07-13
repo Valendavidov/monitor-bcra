@@ -460,6 +460,21 @@ def seccion_sofr(key_prefix: str) -> float:
     return sofr_api_pct
 
 
+def selector_formato_numeros(key: str) -> str:
+    """Radio Español/Americano para elegir como interpretar los numeros
+    (y fechas) del texto que se pega en Ops Historicas - depende de la
+    configuracion regional de la compu/navegador desde donde se copio el
+    reporte, no de la app (una compu en ingles pega "4,242,000" y
+    "100.25000" en vez de "4.242.000" y "100,25000"). Devuelve "es" o
+    "us" para pasarle a _num_es()/_fecha_es() y a los parsers."""
+    opcion = st.radio(
+        "Formato de números/fechas en el texto pegado",
+        ["Español (1.234,56 – DD/MM/AAAA)", "Americano (1,234.56 – MM/DD/AAAA)"],
+        horizontal=True, key=key,
+    )
+    return "es" if opcion.startswith("Español") else "us"
+
+
 # ---------------------------------------------------------------------------
 # Ops Historicas (Uruguay): parseo de los reportes BEVSA / Externas que se
 # pegan a mano en un textarea, para armar una tabla combinada de operaciones
@@ -476,16 +491,19 @@ def _dividir_fila_pegada(linea: str) -> list:
     return [c.strip() for c in re.split(r"\s{2,}", linea.strip())]
 
 
-def _num_es(texto: str):
-    """Convierte un numero en formato español/uruguayo (punto de miles,
-    coma decimal - ej. "20.000.000,00") a float. Es la fuente (BEVSA/
-    Externas) la que viene en ese formato - no tiene relacion con fmt_es(),
-    que es el formato de SALIDA del resto de la app (coma de miles, punto
-    decimal). Devuelve None si la celda viene vacia O si no se pudo
-    convertir (ej. se pego desde otra compu/navegador con un espacio no
-    estandar, o la celda vino corrida) - una celda rara no debe tirar
-    abajo toda la tabla, mejor mostrar "—" ahi y que se note visualmente
-    en vez de que la pagina entera se rompa con un error."""
+def _num_es(texto: str, formato: str = "es"):
+    """Convierte un numero de texto a float. `formato`:
+      - "es" (español/uruguayo): punto de miles, coma decimal
+        (ej. "20.000.000,00").
+      - "us" (americano): coma de miles, punto decimal
+        (ej. "20,000,000.00") - pasa esto cuando el reporte se pego desde
+        una compu/navegador configurado en ingles (Excel de EEUU, etc.).
+    Esto es el formato de ENTRADA de la fuente (BEVSA/Externas) - no
+    tiene relacion con fmt_es(), que es el formato de SALIDA del resto
+    de la app (coma de miles, punto decimal, fijo, no configurable).
+    Devuelve None si la celda viene vacia O si no se pudo convertir (ej.
+    la celda vino corrida, o tenia un caracter raro) - una celda rara no
+    debe tirar abajo toda la tabla, mejor mostrar "—" ahi."""
     if texto is None:
         return None
     # \xa0 = espacio "duro" (non-breaking space) - algunos navegadores lo
@@ -494,19 +512,23 @@ def _num_es(texto: str):
     if not texto:
         return None
     try:
+        if formato == "us":
+            return float(texto.replace(",", ""))
         return float(texto.replace(".", "").replace(",", "."))
     except ValueError:
         return None
 
 
-def _fecha_es(texto: str) -> date:
-    """Convierte una fecha DD/MM/AAAA (formato de la columna FECHA
-    LIQUIDACIÓN de Externas) a date."""
-    d, m, a = texto.strip().split("/")
+def _fecha_es(texto: str, formato: str = "es") -> date:
+    """Convierte una fecha de texto a date. `formato`:
+      - "es": DD/MM/AAAA (formato habitual de FECHA LIQUIDACIÓN).
+      - "us": MM/DD/AAAA (compu/navegador configurado en ingles)."""
+    p1, p2, a = texto.strip().split("/")
+    d, m = (p1, p2) if formato == "es" else (p2, p1)
     return date(int(a), int(m), int(d))
 
 
-def mapear_ticker_bevsa(descripcion: str, registry_uy: pd.DataFrame):
+def mapear_ticker_bevsa(descripcion: str, registry_uy: pd.DataFrame, formato: str = "es"):
     """Identifica el bono a partir de la descripcion de BEVSA (ej. "BONO
     GLOBAL $ 10/35 8%"): parsea el mes/año de vencimiento y el cupon, y
     los cruza contra bonos_universo_uy.csv (coincidencia exacta de mes,
@@ -518,7 +540,9 @@ def mapear_ticker_bevsa(descripcion: str, registry_uy: pd.DataFrame):
         return None
     mes, anio_corto, cupon_txt = int(m.group(1)), int(m.group(2)), m.group(3)
     anio = 2000 + anio_corto
-    cupon = float(cupon_txt.replace(",", "."))
+    cupon = _num_es(cupon_txt, formato)
+    if cupon is None:
+        return None
     match = registry_uy[
         (registry_uy["maturity"].apply(lambda d: d.month) == mes)
         & (registry_uy["maturity"].apply(lambda d: d.year) == anio)
@@ -545,12 +569,14 @@ def mapear_ticker_externas(descripcion: str, registry_uy: pd.DataFrame):
     return match.iloc[0]["nombre"] if not match.empty else None
 
 
-def parsear_bevsa(texto: str, registry_uy: pd.DataFrame) -> pd.DataFrame:
+def parsear_bevsa(texto: str, registry_uy: pd.DataFrame, formato: str = "es") -> pd.DataFrame:
     """Parsea el reporte de BEVSA pegado a mano. Se queda solo con las
     filas de BONOS (cualquier fila cuyo instrumento no empiece con "BONO"
     se descarta - eso ya excluye el titulo, el encabezado, las LETRAS R.
     MONETARIA, las NOTAS DE T. y la fila de TOTAL, todas de un saque).
-    Devuelve nombre_bono/nominales/usd/px/entidad/settlement por fila."""
+    `formato` ("es"/"us") indica como vienen escritos los numeros - ver
+    _num_es().  Devuelve nombre_bono/nominales/usd/px/entidad/settlement
+    por fila."""
     filas = []
     for linea in texto.splitlines():
         celdas = _dividir_fila_pegada(linea)
@@ -559,12 +585,12 @@ def parsear_bevsa(texto: str, registry_uy: pd.DataFrame) -> pd.DataFrame:
         instrumento = celdas[0]
         if not instrumento.upper().startswith("BONO"):
             continue
-        ticker = mapear_ticker_bevsa(instrumento, registry_uy)
+        ticker = mapear_ticker_bevsa(instrumento, registry_uy, formato)
         filas.append({
             "nombre_bono": ticker or instrumento,
-            "nominales": _num_es(celdas[2]),   # CANTIDAD
-            "usd": _num_es(celdas[3]),         # MONTO TRANS. U$S
-            "px": _num_es(celdas[9]),          # PRECIO CIERRE
+            "nominales": _num_es(celdas[2], formato),   # CANTIDAD
+            "usd": _num_es(celdas[3], formato),         # MONTO TRANS. U$S
+            "px": _num_es(celdas[9], formato),          # PRECIO CIERRE
             "entidad": "BEVSA",
             # BEVSA no trae fecha de liquidacion propia: se usa T+1 habil
             # sobre la fecha en que se pega el reporte (mismo criterio que
@@ -574,11 +600,13 @@ def parsear_bevsa(texto: str, registry_uy: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(filas)
 
 
-def parsear_externas(texto: str, registry_uy: pd.DataFrame) -> pd.DataFrame:
+def parsear_externas(texto: str, registry_uy: pd.DataFrame, formato: str = "es") -> pd.DataFrame:
     """Parsea el reporte de Externas pegado a mano. Se queda con las
     filas cuya descripcion empieza con "BONO" Y menciona "UY" (ej. el
     sufijo "EUY") - las que no (ej. "USF") no son bonos uruguayos y se
-    descartan directamente, no se muestran ni sin mapear."""
+    descartan directamente, no se muestran ni sin mapear. `formato`
+    ("es"/"us") indica como vienen escritos numeros Y fechas - ver
+    _num_es()/_fecha_es()."""
     filas = []
     for linea in texto.splitlines():
         celdas = _dividir_fila_pegada(linea)
@@ -589,25 +617,26 @@ def parsear_externas(texto: str, registry_uy: pd.DataFrame) -> pd.DataFrame:
             continue
         ticker = mapear_ticker_externas(descripcion, registry_uy)
         try:
-            settlement = _fecha_es(celdas[5])
+            settlement = _fecha_es(celdas[5], formato)
         except (ValueError, IndexError):
             settlement = SETTLEMENT_DEFAULT
         filas.append({
             "nombre_bono": ticker or descripcion,
-            "nominales": _num_es(celdas[2]),  # VALOR NOMINAL
-            "px": _num_es(celdas[3]),         # PRECIO SIN CUPÓN
-            "usd": _num_es(celdas[4]),        # VALOR EFECTIVO
+            "nominales": _num_es(celdas[2], formato),  # VALOR NOMINAL
+            "px": _num_es(celdas[3], formato),         # PRECIO SIN CUPÓN
+            "usd": _num_es(celdas[4], formato),        # VALOR EFECTIVO
             "entidad": "Externas",
             "settlement": settlement,
         })
     return pd.DataFrame(filas)
 
 
-def parsear_bevsa_cambios(texto: str):
+def parsear_bevsa_cambios(texto: str, formato: str = "es"):
     """Parsea el reporte BEVSA - Mercado Cambios pegado a mano (mismas 12
     columnas que el reporte de bonos de BEVSA: INSTRUMENTO, PLAZO,
     CANTIDAD, MONTO TRANS. U$S, N° TRANS., PRECIO MAYOR, PRECIO MENOR,
-    PRECIO MEDIO, PRECIO ÚLTIMO, PRECIO CIERRE, COND, VAR. %).
+    PRECIO MEDIO, PRECIO ÚLTIMO, PRECIO CIERRE, COND, VAR. %). `formato`
+    ("es"/"us") indica como vienen escritos numeros Y fechas.
 
     La fila "DOLAR" a secas es el spot del dia (su PRECIO CIERRE es la
     cotizacion de contado). Las filas "DOLAR <mes> <fecha>" son los NDFs -
@@ -628,20 +657,24 @@ def parsear_bevsa_cambios(texto: str):
         instrumento = celdas[0].strip()
         if not instrumento.upper().startswith("DOLAR"):
             continue
-        precio_cierre = _num_es(celdas[9])
+        precio_cierre = _num_es(celdas[9], formato)
         if instrumento.upper() == "DOLAR":
             spot = precio_cierre
             continue
         m = re.search(r"(\d{2}/\d{2}/\d{4})", instrumento)
         if not m:
             continue
+        try:
+            fecha_fixing = _fecha_es(m.group(1), formato)
+        except ValueError:
+            continue
         filas_ndf.append({
             "instrumento": instrumento,
             "plazo": celdas[1],
-            "cantidad": _num_es(celdas[2]),   # CANTIDAD
-            "usd": _num_es(celdas[3]),        # MONTO TRANS. U$S
-            "puntos": precio_cierre,          # PRECIO CIERRE
-            "fecha_fixing": _fecha_es(m.group(1)),
+            "cantidad": _num_es(celdas[2], formato),   # CANTIDAD
+            "usd": _num_es(celdas[3], formato),        # MONTO TRANS. U$S
+            "puntos": precio_cierre,                   # PRECIO CIERRE
+            "fecha_fixing": fecha_fixing,
         })
     return spot, filas_ndf
 
@@ -1518,6 +1551,7 @@ if pais == "Uruguay":
                 fecha_ref_ndf = st.date_input(
                     "Fecha de referencia (para los días al fixing)", value=date.today(), key="ops_ndf_fecha_ref",
                 )
+                formato_ndf = selector_formato_numeros("ops_formato_ndf")
             with col_sofr:
                 sofr_pct_ndf = seccion_sofr("ops_ndf")
 
@@ -1527,7 +1561,7 @@ if pais == "Uruguay":
             if not texto_ndf.strip():
                 st.caption("Pegá el reporte de BEVSA - Mercado Cambios arriba para ver la tabla.")
             else:
-                spot_ndf, filas_ndf = parsear_bevsa_cambios(texto_ndf)
+                spot_ndf, filas_ndf = parsear_bevsa_cambios(texto_ndf, formato_ndf)
                 if spot_ndf is None:
                     st.warning('No encontré la fila "DOLAR" (spot) en el texto pegado.')
                 elif not filas_ndf:
@@ -1618,8 +1652,13 @@ if pais == "Uruguay":
                     "Pegar reporte Externas (precio sin cupón)", height=220, key="ops_externas_texto",
                 )
 
-            df_bevsa = parsear_bevsa(texto_bevsa, registry) if texto_bevsa.strip() else pd.DataFrame()
-            df_externas = parsear_externas(texto_externas, registry) if texto_externas.strip() else pd.DataFrame()
+            formato_bonos = selector_formato_numeros("ops_formato_bonos")
+
+            df_bevsa = parsear_bevsa(texto_bevsa, registry, formato_bonos) if texto_bevsa.strip() else pd.DataFrame()
+            df_externas = (
+                parsear_externas(texto_externas, registry, formato_bonos)
+                if texto_externas.strip() else pd.DataFrame()
+            )
             combinada = pd.concat([df_bevsa, df_externas], ignore_index=True)
 
             st.divider()
