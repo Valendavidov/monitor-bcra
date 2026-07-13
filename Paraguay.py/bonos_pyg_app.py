@@ -744,10 +744,6 @@ with tab_monitor:
 # especial para la primera fila: "HOY" funciona como cualquier otro nodo de la curva.
 with tab_fras:
     st.subheader("FRAs — tasas forward implícitas")
-    st.caption(
-        "Ingresá el yield semianual spot de cada bono de la curva; el yield anual y las "
-        "dos matrices de forwards (semianual y anual) se recalculan solas."
-    )
 
     # Para Uruguay hay que elegir UNA curva completa (UI o Globales) - a
     # diferencia de filtrar_por_categoria() de mas arriba, aca no existe
@@ -786,7 +782,11 @@ with tab_fras:
         yld_anual = ((1 + yld_semi / 100) ** 2 - 1) * 100
         input_rows.append({
             "bono": n,
-            "dias_vto": int(row["dias_vto"]),
+            # dias_vto se pre-formatea a texto (punto de miles, estilo
+            # español) porque es de solo lectura: como NumberColumn de
+            # fabrica no separa miles, un vencimiento largo (ej. 7305
+            # dias) se veria sin el punto que usa el resto de la app.
+            "dias_vto": fmt_es(row["dias_vto"], decimales=0),
             "yield_semianual": round(yld_semi, DEC),
             "yield_anual": round(yld_anual, DEC),
         })
@@ -799,10 +799,15 @@ with tab_fras:
         disabled=["bono", "dias_vto", "yield_anual"],
         column_config={
             "bono": st.column_config.TextColumn("BONO"),
-            "dias_vto": st.column_config.NumberColumn("DÍAS AL VTO"),
-            # yield_semianual es la unica columna editable: el yield anual
-            # se recalcula solo a partir de ella, mas abajo.
-            "yield_semianual": st.column_config.NumberColumn("YIELD SEMIANUAL %", format="localized"),
+            "dias_vto": st.column_config.TextColumn("DÍAS AL VTO"),
+            # yield_semianual es la unica columna editable (el yield anual
+            # se recalcula solo a partir de ella, mas abajo) - el icono y
+            # el "(EDITABLE)" en el titulo la resaltan para que se note
+            # cual es el input, ya que el editor no permite pintarle el
+            # fondo a una sola columna (se dibuja en un canvas, no en HTML).
+            "yield_semianual": st.column_config.NumberColumn(
+                "✏️ YIELD SEMIANUAL % (EDITABLE)", format="localized"
+            ),
             "yield_anual": st.column_config.NumberColumn("YIELD ANUAL %", format="localized"),
         },
         key=f"fras_editor_{fra_key_suffix}",
@@ -838,28 +843,51 @@ with tab_fras:
     def armar_matriz(tipo: str) -> pd.DataFrame:
         """tipo: 'semianual' o 'anual'. Solo se completan las celdas donde
         el vencimiento de la columna es posterior al de la fila (la parte
-        triangular superior, sin la diagonal); el resto queda vacio."""
+        triangular superior, sin la diagonal); el resto queda NaN (vacio).
+        Devuelve numeros (float), no texto - el formato y el color se
+        aplican despues, al mostrar (ver _mostrar_matriz)."""
         filas = []
         for i, ni in enumerate(nodos):
             fila = []
             for j, nj in enumerate(nodos):
                 if j <= i:
-                    fila.append("")
+                    fila.append(float("nan"))
                 else:
                     fwd_anual = forward_anual_pct(ni, nj)
                     if tipo == "anual":
-                        fila.append(fmt_es(fwd_anual))
+                        fila.append(fwd_anual)
                     else:
-                        fwd_semi = ((1 + fwd_anual / 100) ** 0.5 - 1) * 100
-                        fila.append(fmt_es(fwd_semi))
+                        fila.append(((1 + fwd_anual / 100) ** 0.5 - 1) * 100)
             filas.append(fila)
         return pd.DataFrame(filas, columns=etiquetas, index=etiquetas)
 
-    def _pintar_vacias(v):
-        return "color: #3A3F47;" if v == "" else ""
+    # Semaforo verde-amarillo-rojo: la tasa mas baja de la matriz queda
+    # verde, la mas alta queda roja, y todo lo del medio se interpola. Las
+    # tasas fwd se muestran con PUNTO decimal (no coma, a diferencia del
+    # resto de la app) porque asi las pidio el usuario para esta tabla en
+    # particular - son porcentajes que se leen mejor "a la Bloomberg".
+    _VERDE, _AMARILLO, _ROJO = (46, 204, 113), (241, 196, 15), (231, 76, 60)
+
+    def _interp(c1, c2, f):
+        return tuple(int(c1[k] + (c2[k] - c1[k]) * f) for k in range(3))
+
+    def _mostrar_matriz(df: pd.DataFrame):
+        valores = df.to_numpy(dtype=float)
+        validos = valores[~pd.isna(valores)]
+        lo, hi = (float(validos.min()), float(validos.max())) if len(validos) else (0.0, 1.0)
+
+        def _color(v):
+            if pd.isna(v):
+                return "color: #3A3F47;"
+            frac = 0.5 if hi == lo else min(max((v - lo) / (hi - lo), 0.0), 1.0)
+            rgb = _interp(_VERDE, _AMARILLO, frac / 0.5) if frac <= 0.5 else _interp(_AMARILLO, _ROJO, (frac - 0.5) / 0.5)
+            return f"background-color: rgb{rgb}; color: #14181F; font-weight: 600;"
+
+        styled = df.style.map(_color).format(lambda v: "" if pd.isna(v) else f"{v:.{DEC}f}")
+        st.dataframe(styled, use_container_width=True)
 
     st.markdown("#### Matriz de forwards — tasa semianual")
-    st.dataframe(armar_matriz("semianual").style.map(_pintar_vacias), use_container_width=True)
+    _mostrar_matriz(armar_matriz("semianual"))
 
     st.markdown("#### Matriz de forwards — tasa anual")
-    st.dataframe(armar_matriz("anual").style.map(_pintar_vacias), use_container_width=True)
+    _mostrar_matriz(armar_matriz("anual"))
