@@ -1087,11 +1087,11 @@ with tab_ndf:
         # este elegido arriba en el selector de "País" (Paraguay/Uruguay).
         codigos_feriados = [CODIGO_HOLIDAYS_PAIS[pais], "US"]
         fecha_valuta = sumar_dias_habiles(fecha_fixing, 2, codigos_feriados)
-        st.markdown('<div class="yas-label">FECHA VALUTA (VALUE DATE)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="yas-label">VALUE DATE</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="yas-value">{fecha_valuta}</div>', unsafe_allow_html=True)
         st.caption(f"Fixing + 2 días hábiles (feriados de {pais} + EEUU).")
 
-        hasta = st.radio("Días al vencimiento hasta", ["Fixing", "Valuta"], horizontal=True, key="ndf_dias_hasta")
+        hasta = st.radio("Días al vencimiento hasta", ["Fixing", "Value Date"], horizontal=True, key="ndf_dias_hasta")
         fecha_referencia = fecha_fixing if hasta == "Fixing" else fecha_valuta
         dias = (fecha_referencia - dia_operado).days
         st.markdown('<div class="yas-label">DÍAS AL VENCIMIENTO</div>', unsafe_allow_html=True)
@@ -1131,7 +1131,7 @@ with tab_ndf:
     st.markdown("#### Cálculo")
 
     if spot <= 0 or dias <= 0:
-        st.caption("Ingresá un spot y una fecha de fixing/valuta válidos (posteriores al día operado) para calcular.")
+        st.caption("Ingresá un spot y una fecha de fixing/value date válidos (posteriores al día operado) para calcular.")
     else:
         modo_calculo = st.radio(
             "Ingresar por", ["Yield", "Precio futuro"], horizontal=True, key="ndf_modo_calculo",
