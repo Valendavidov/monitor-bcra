@@ -97,19 +97,17 @@ SETTLEMENT_DEFAULT = siguiente_dia_habil(date.today() + timedelta(days=1))
 
 
 def fmt_es(x: float, decimales: int = DEC) -> str:
-    """Formatea un numero al estilo español/latinoamericano: punto como
-    separador de miles, coma como separador decimal (ej. 1.234.567,891).
+    """Formatea un numero con coma como separador de miles y punto como
+    separador decimal (ej. 1,234,567.891) - el formato "de fabrica" de
+    Python, asi que no hace falta ningun intercambio de simbolos.
 
-    Python solo sabe formatear al reves (coma miles, punto decimal), asi
-    que se arma con el formato "de siempre" y despues se intercambian los
-    dos simbolos. Se usa en todo texto que dibujamos nosotros mismos
-    (metricas, la grilla de YAS, la conversion de moneda). Los inputs
-    numericos (st.number_input) y las columnas EDITABLES de las tablas se
-    dejan con punto decimal de fabrica, porque cambiarles el formato ahi
-    podria romper la edicion (el navegador espera tipear con punto).
+    Se usa en todo texto que dibujamos nosotros mismos (metricas, la
+    grilla de YAS, la conversion de moneda). Los inputs numericos
+    (st.number_input) y las columnas EDITABLES de las tablas se dejan con
+    punto decimal de fabrica sin separador de miles, porque cambiarles el
+    formato ahi podria romper la edicion.
     """
-    texto = f"{x:,.{decimales}f}"
-    return texto.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    return f"{x:,.{decimales}f}"
 
 # Un diccionario por pais con todo lo que cambia entre uno y otro: de que
 # archivo CSV sale el universo de bonos, y la paleta de colores (basada en
@@ -406,7 +404,7 @@ with tab_cashflow:
     # .rename(columns=str.upper): a diferencia de las tablas EDITABLES de
     # mas abajo, esta es de solo lectura (st.dataframe), asi que alcanza
     # con renombrar las columnas del propio DataFrame a mayuscula y
-    # pre-formatear los numeros a mano (punto de miles, coma decimal).
+    # pre-formatear los numeros a mano (coma de miles, punto decimal).
     cf_display = cf.copy()
     for col in ["periodos_semestrales", "cupon", "principal", "flujo_total"]:
         cf_display[col] = cf_display[col].map(fmt_es)
@@ -644,8 +642,8 @@ with tab_monitor:
         # dos pares es editable segun el modo, y las columnas editables
         # necesitan seguir siendo NumberColumn). Los campos que SIEMPRE
         # son de solo lectura (spread, cupon, duration, paridad) se
-        # pre-formatean a texto en estilo español (punto miles, coma
-        # decimal), porque esos si podemos controlarlos por completo.
+        # pre-formatean a texto (coma miles, punto decimal), porque esos
+        # si podemos controlarlos por completo.
         tabla_rows.append({
             "nombre": n,
             "isin": row.get("isin", ""),
@@ -782,10 +780,10 @@ with tab_fras:
         yld_anual = ((1 + yld_semi / 100) ** 2 - 1) * 100
         input_rows.append({
             "bono": n,
-            # dias_vto se pre-formatea a texto (punto de miles, estilo
-            # español) porque es de solo lectura: como NumberColumn de
-            # fabrica no separa miles, un vencimiento largo (ej. 7305
-            # dias) se veria sin el punto que usa el resto de la app.
+            # dias_vto se pre-formatea a texto (coma de miles) porque es
+            # de solo lectura: como NumberColumn de fabrica no separa
+            # miles, un vencimiento largo (ej. 7305 dias) se veria sin la
+            # coma que usa el resto de la app.
             "dias_vto": fmt_es(row["dias_vto"], decimales=0),
             "yield_semianual": round(yld_semi, DEC),
             "yield_anual": round(yld_anual, DEC),
