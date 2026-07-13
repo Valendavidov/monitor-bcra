@@ -797,32 +797,42 @@ with tab_fras:
     input_rows = []
     for _, row in curva.iterrows():
         n = row["nombre"]
+        dias = int(row["dias_vto"])
         yld_semi = st.session_state[fras_yield_key][n]
-        yld_anual = ((1 + yld_semi / 100) ** 2 - 1) * 100
+        # TEA (tasa efectiva anual): "yield_semianual" es la tasa NOMINAL
+        # compuesta semestralmente, asi que la tasa POR PERIODO (6 meses)
+        # es la mitad - de ahi el /2 antes de elevar al cuadrado.
+        tea = ((1 + yld_semi / 100 / 2) ** 2 - 1) * 100
+        # TNA (tasa nominal anual "simple"): anualiza LINEALMENTE el
+        # crecimiento efectivo que da la TEA en los dias propios de ESTE
+        # bono (no en 365 dias parejos) - por eso depende de "dias".
+        tna = (365 / dias) * ((1 + tea / 100) ** (dias / 365) - 1) * 100
         input_rows.append({
             "bono": n,
             # dias_vto se pre-formatea a texto (coma de miles) porque es
             # de solo lectura: como NumberColumn de fabrica no separa
             # miles, un vencimiento largo (ej. 7305 dias) se veria sin la
             # coma que usa el resto de la app.
-            "dias_vto": fmt_es(row["dias_vto"], decimales=0),
+            "dias_vto": fmt_es(dias, decimales=0),
             "yield_semianual": round(yld_semi, DEC),
-            "yield_anual": round(yld_anual, DEC),
+            "yield_anual": round(tea, DEC),
+            "tna": round(tna, DEC),
         })
     input_df = pd.DataFrame(input_rows)
 
-    input_styler = resaltar_columnas_editables(input_df, ["bono", "dias_vto", "yield_anual"])
+    input_styler = resaltar_columnas_editables(input_df, ["bono", "dias_vto", "yield_anual", "tna"])
 
     input_edited = st.data_editor(
         input_styler,
         use_container_width=True,
         hide_index=True,
-        disabled=["bono", "dias_vto", "yield_anual"],
+        disabled=["bono", "dias_vto", "yield_anual", "tna"],
         column_config={
             "bono": st.column_config.TextColumn("BONO"),
             "dias_vto": st.column_config.TextColumn("DÍAS AL VTO"),
             "yield_semianual": st.column_config.NumberColumn("YIELD SEMIANUAL %", format="localized"),
-            "yield_anual": st.column_config.NumberColumn("YIELD ANUAL %", format="localized"),
+            "yield_anual": st.column_config.NumberColumn("YIELD ANUAL (TEA) %", format="localized"),
+            "tna": st.column_config.NumberColumn("TNA %", format="localized"),
         },
         key=f"fras_editor_{fra_key_suffix}",
     )
@@ -835,29 +845,48 @@ with tab_fras:
     # mismo orden (ascendente por vencimiento) que la tabla de arriba.
     nombres = curva["nombre"].tolist()
     codigos = dict(zip(curva["nombre"], curva["codigo"]))
+    dias_por_bono = {n: int(curva[curva["nombre"] == n]["dias_vto"].iloc[0]) for n in nombres}
+    anios_al_vto = {n: dias_por_bono[n] / 365 for n in nombres}
+
     yield_semi = {n: st.session_state[fras_yield_key][n] for n in nombres}
-    yield_anual_pct = {n: ((1 + yield_semi[n] / 100) ** 2 - 1) * 100 for n in nombres}
-    anios_al_vto = {n: int(curva[curva["nombre"] == n]["dias_vto"].iloc[0]) / 365 for n in nombres}
+    yield_tea = {n: ((1 + yield_semi[n] / 100 / 2) ** 2 - 1) * 100 for n in nombres}
+    yield_tna = {
+        n: (365 / dias_por_bono[n]) * ((1 + yield_tea[n] / 100) ** (dias_por_bono[n] / 365) - 1) * 100
+        for n in nombres
+    }
 
     nodos = ["HOY"] + nombres
     etiquetas = ["HOY"] + [codigos[n] for n in nombres]
     t_por_nodo = {"HOY": 0.0, **anios_al_vto}
-    y_anual_por_nodo = {"HOY": 0.0, **yield_anual_pct}  # el 0.0 de HOY no afecta el resultado (ver nota arriba)
 
-    def forward_anual_pct(nodo_i: str, nodo_j: str) -> float:
-        """Tasa forward anual implicita entre el vencimiento de nodo_i y el
-        de nodo_j (nodo_j tiene que vencer despues). Si nodo_i es "HOY"
-        (ti=0), el resultado da exactamente el yield anual spot de
-        nodo_j - no hace falta tratarlo distinto."""
-        ti, tj = t_por_nodo[nodo_i], t_por_nodo[nodo_j]
-        yi = y_anual_por_nodo[nodo_i] / 100
-        yj = y_anual_por_nodo[nodo_j] / 100
-        return (((1 + yj) ** tj / (1 + yi) ** ti) ** (1 / (tj - ti)) - 1) * 100
+    # Las tres tasas base que se pueden elegir para alimentar cada matriz.
+    # El nodo "HOY" lleva 0.0 en las tres - no importa cual valor tenga,
+    # porque con ti=0 las dos formulas de abajo lo cancelan solas.
+    TASAS_BASE = {
+        "Semi Anual": {"HOY": 0.0, **yield_semi},
+        "Anual (TEA)": {"HOY": 0.0, **yield_tea},
+        "TNA": {"HOY": 0.0, **yield_tna},
+    }
 
-    def armar_matriz(tipo: str):
-        """tipo: 'semianual' o 'anual'. Solo se completan las celdas donde
-        el vencimiento de la columna es posterior al de la fila (la parte
-        triangular superior, sin la diagonal); el resto queda vacio.
+    def forward_compounding(ti: float, ri: float, tj: float, rj: float) -> float:
+        """a) Anual compounding: forward compuesto, con exponente en
+        años (dias/365). Con ti=0 (nodo HOY) da exactamente rj, sea cual
+        sea ri (no hace falta un caso especial para la fila/columna HOY).
+        Tasas en decimal (no %); devuelve decimal."""
+        return ((1 + rj) ** tj / (1 + ri) ** ti) ** (1 / (tj - ti)) - 1
+
+    def forward_simple(ti: float, ri: float, tj: float, rj: float) -> float:
+        """b) Simple rate: forward lineal (tipo Act/365 simple), en vez
+        de compuesto. Misma propiedad que forward_compounding respecto
+        del nodo HOY. Tasas en decimal; devuelve decimal."""
+        return ((1 + rj * tj) / (1 + ri * ti) - 1) / (tj - ti)
+
+    def armar_matriz(tasas_pct: dict, formula):
+        """tasas_pct: {nodo: tasa en %} - la tasa base elegida para esta
+        matriz. formula: forward_compounding o forward_simple. Solo se
+        completan las celdas donde el vencimiento de la columna es
+        posterior al de la fila (triangular superior, sin diagonal); el
+        resto queda vacio.
 
         Devuelve dos DataFrames del mismo tamaño/indice:
           - texto: lo que se ve en pantalla (numeros ya formateados con
@@ -876,8 +905,9 @@ with tab_fras:
                     fila_t.append("")
                     fila_c.append(None)
                 else:
-                    fwd_anual = forward_anual_pct(ni, nj)
-                    valor = fwd_anual if tipo == "anual" else ((1 + fwd_anual / 100) ** 0.5 - 1) * 100
+                    ti, tj = t_por_nodo[ni], t_por_nodo[nj]
+                    ri, rj = tasas_pct[ni] / 100, tasas_pct[nj] / 100
+                    valor = formula(ti, ri, tj, rj) * 100
                     fila_t.append(f"{valor:.{DEC}f}")
                     fila_c.append(valor)
             filas_texto.append(fila_t)
@@ -920,8 +950,14 @@ with tab_fras:
         estilos = crudo.map(_color)
         st.dataframe(texto.style.apply(lambda _: estilos, axis=None), use_container_width=True)
 
-    st.markdown("#### Matriz de forwards — tasa semianual")
-    _mostrar_matriz(*armar_matriz("semianual"))
+    st.markdown("#### a) Anual Compounding")
+    base_a = st.radio(
+        "Tasa de base", list(TASAS_BASE.keys()), horizontal=True, index=0, key=f"fras_base_a_{fra_key_suffix}",
+    )
+    _mostrar_matriz(*armar_matriz(TASAS_BASE[base_a], forward_compounding))
 
-    st.markdown("#### Matriz de forwards — tasa anual")
-    _mostrar_matriz(*armar_matriz("anual"))
+    st.markdown("#### b) Simple Rate")
+    base_b = st.radio(
+        "Tasa de base", list(TASAS_BASE.keys()), horizontal=True, index=2, key=f"fras_base_b_{fra_key_suffix}",
+    )
+    _mostrar_matriz(*armar_matriz(TASAS_BASE[base_b], forward_simple))
