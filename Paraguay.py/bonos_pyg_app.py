@@ -460,21 +460,6 @@ def seccion_sofr(key_prefix: str) -> float:
     return sofr_api_pct
 
 
-def selector_formato_numeros(key: str) -> str:
-    """Radio Español/Americano para elegir como interpretar los numeros
-    (y fechas) del texto que se pega en Ops Historicas - depende de la
-    configuracion regional de la compu/navegador desde donde se copio el
-    reporte, no de la app (una compu en ingles pega "4,242,000" y
-    "100.25000" en vez de "4.242.000" y "100,25000"). Devuelve "es" o
-    "us" para pasarle a _num_es()/_fecha_es() y a los parsers."""
-    opcion = st.radio(
-        "Formato de números/fechas en el texto pegado",
-        ["Español (1.234,56 – DD/MM/AAAA)", "Americano (1,234.56 – MM/DD/AAAA)"],
-        horizontal=True, key=key,
-    )
-    return "es" if opcion.startswith("Español") else "us"
-
-
 # ---------------------------------------------------------------------------
 # Ops Historicas (Uruguay): parseo de los reportes BEVSA / Externas que se
 # pegan a mano en un textarea, para armar una tabla combinada de operaciones
@@ -1551,7 +1536,6 @@ if pais == "Uruguay":
                 fecha_ref_ndf = st.date_input(
                     "Fecha de referencia (para los días al fixing)", value=date.today(), key="ops_ndf_fecha_ref",
                 )
-                formato_ndf = selector_formato_numeros("ops_formato_ndf")
             with col_sofr:
                 sofr_pct_ndf = seccion_sofr("ops_ndf")
 
@@ -1561,7 +1545,8 @@ if pais == "Uruguay":
             if not texto_ndf.strip():
                 st.caption("Pegá el reporte de BEVSA - Mercado Cambios arriba para ver la tabla.")
             else:
-                spot_ndf, filas_ndf = parsear_bevsa_cambios(texto_ndf, formato_ndf)
+                # BEVSA (mercado local) siempre viene en formato español.
+                spot_ndf, filas_ndf = parsear_bevsa_cambios(texto_ndf, "es")
                 if spot_ndf is None:
                     st.warning('No encontré la fila "DOLAR" (spot) en el texto pegado.')
                 elif not filas_ndf:
@@ -1652,11 +1637,13 @@ if pais == "Uruguay":
                     "Pegar reporte Externas (precio sin cupón)", height=220, key="ops_externas_texto",
                 )
 
-            formato_bonos = selector_formato_numeros("ops_formato_bonos")
-
-            df_bevsa = parsear_bevsa(texto_bevsa, registry, formato_bonos) if texto_bevsa.strip() else pd.DataFrame()
+            # BEVSA (mercado local) siempre viene en formato español;
+            # Externas siempre viene en formato americano - son de
+            # fuentes distintas, no depende de la compu desde donde se
+            # pega, asi que queda fijo en vez de pedirselo a la usuaria.
+            df_bevsa = parsear_bevsa(texto_bevsa, registry, "es") if texto_bevsa.strip() else pd.DataFrame()
             df_externas = (
-                parsear_externas(texto_externas, registry, formato_bonos)
+                parsear_externas(texto_externas, registry, "us")
                 if texto_externas.strip() else pd.DataFrame()
             )
             combinada = pd.concat([df_bevsa, df_externas], ignore_index=True)
