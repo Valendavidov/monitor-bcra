@@ -693,7 +693,44 @@ with tab_monitor:
 
     tabla_styler = resaltar_columnas_editables(tabla_df[columnas_orden], disabled_cols)
 
-    tabla_edited = st.data_editor(
+    # Orden estable de bonos (coincide con el de "monitor_universe"/tabla_df)
+    # para mapear el indice de fila que devuelve el editor a un nombre de
+    # bono dentro del callback de abajo.
+    nombres_orden_mesa = monitor_universe["nombre"].tolist()
+    mesa_editor_key = f"tabla_editor_{pais}_{modo_mesa}"
+
+    def _mesa_on_edit():
+        """Se dispara ANTES de que el script vuelva a correr, asi que si
+        edito precio, el yield correspondiente (y viceversa) ya esta en
+        session_state cuando se reconstruye la tabla - sin este callback,
+        el otro lado del par (y duration/paridad, que dependen del precio
+        medio) quedaban un paso atras: se actualizaban recien en la
+        SIGUIENTE edicion, como si hubiera que tipear el valor dos veces."""
+        estado = st.session_state.get(mesa_editor_key, {})
+        for idx, cambios in estado.get("edited_rows", {}).items():
+            n = nombres_orden_mesa[idx]
+            bono_row = registry[registry["nombre"] == n].iloc[0]
+            b = make_bond(bono_row)
+            if modo_mesa == "Precio":
+                if "px_bid" in cambios:
+                    px_bid = float(cambios["px_bid"])
+                    st.session_state[px_bid_key][n] = px_bid
+                    st.session_state[yld_bid_key][n] = b.yield_to_worst(px_bid, mesa_settlement)
+                if "px_offer" in cambios:
+                    px_offer = float(cambios["px_offer"])
+                    st.session_state[px_offer_key][n] = px_offer
+                    st.session_state[yld_offer_key][n] = b.yield_to_worst(px_offer, mesa_settlement)
+            else:
+                if "yield_bid" in cambios:
+                    yield_bid = float(cambios["yield_bid"])
+                    st.session_state[yld_bid_key][n] = yield_bid
+                    st.session_state[px_bid_key][n] = b.price_to_worst(yield_bid, mesa_settlement)
+                if "yield_offer" in cambios:
+                    yield_offer = float(cambios["yield_offer"])
+                    st.session_state[yld_offer_key][n] = yield_offer
+                    st.session_state[px_offer_key][n] = b.price_to_worst(yield_offer, mesa_settlement)
+
+    st.data_editor(
         tabla_styler,
         use_container_width=True,
         hide_index=True,
@@ -718,33 +755,9 @@ with tab_monitor:
             "duracion_modificada": st.column_config.TextColumn("MOD. DURATION"),
             "paridad": st.column_config.TextColumn("PARIDAD"),
         },
-        key=f"tabla_editor_{pais}_{modo_mesa}",
+        key=mesa_editor_key,
+        on_change=_mesa_on_edit,
     )
-
-    # Despues de mostrar la tabla, procesamos lo que el usuario acaba de
-    # editar: si edito precio, recalculamos el yield correspondiente (y
-    # viceversa), y guardamos AMBOS lados en session_state para que la
-    # proxima corrida del script ya muestre todo consistente entre si.
-    for _, row in tabla_edited.iterrows():
-        n = row["nombre"]
-        bono_row = registry[registry["nombre"] == n].iloc[0]
-        b = make_bond(bono_row)
-
-        if modo_mesa == "Precio":
-            px_bid = float(row["px_bid"])
-            px_offer = float(row["px_offer"])
-            yield_bid = b.yield_to_worst(px_bid, mesa_settlement)
-            yield_offer = b.yield_to_worst(px_offer, mesa_settlement)
-        else:
-            yield_bid = float(row["yield_bid"])
-            yield_offer = float(row["yield_offer"])
-            px_bid = b.price_to_worst(yield_bid, mesa_settlement)
-            px_offer = b.price_to_worst(yield_offer, mesa_settlement)
-
-        st.session_state[px_bid_key][n] = px_bid
-        st.session_state[px_offer_key][n] = px_offer
-        st.session_state[yld_bid_key][n] = yield_bid
-        st.session_state[yld_offer_key][n] = yield_offer
 
 
 # =============================================================================
@@ -822,7 +835,26 @@ with tab_fras:
 
     input_styler = resaltar_columnas_editables(input_df, ["bono", "dias_vto", "yield_anual", "tna"])
 
-    input_edited = st.data_editor(
+    # Orden estable de bonos (coincide con el de "curva"/input_df) para
+    # poder mapear el indice de fila que devuelve el editor a un nombre de
+    # bono dentro del callback de abajo.
+    nombres_orden_fras = curva["nombre"].tolist()
+    fras_editor_key = f"fras_editor_{fra_key_suffix}"
+
+    def _fras_on_edit():
+        """Se dispara ANTES de que el script vuelva a correr (a
+        diferencia de leer el valor editado despues de mostrar la tabla),
+        asi que el yield recien tipeado ya esta en session_state cuando
+        se recalculan TEA/TNA y las matrices - sin este callback, esos
+        numeros quedaban un paso atras: aparecian recien en la SIGUIENTE
+        edicion, como si hubiera que tipear el valor dos veces."""
+        estado = st.session_state.get(fras_editor_key, {})
+        for idx, cambios in estado.get("edited_rows", {}).items():
+            if "yield_semianual" in cambios:
+                n = nombres_orden_fras[idx]
+                st.session_state[fras_yield_key][n] = float(cambios["yield_semianual"])
+
+    st.data_editor(
         input_styler,
         use_container_width=True,
         hide_index=True,
@@ -834,16 +866,14 @@ with tab_fras:
             "yield_anual": st.column_config.NumberColumn("YIELD ANUAL (TEA) %", format="localized"),
             "tna": st.column_config.NumberColumn("TNA %", format="localized"),
         },
-        key=f"fras_editor_{fra_key_suffix}",
+        key=fras_editor_key,
+        on_change=_fras_on_edit,
     )
-
-    for _, row in input_edited.iterrows():
-        st.session_state[fras_yield_key][row["bono"]] = float(row["yield_semianual"])
 
     # A partir de aca se arma la curva de nodos que alimenta las dos
     # matrices: un nodo por bono (bono vs bono, sin agregar "HOY"), en el
     # mismo orden (ascendente por vencimiento) que la tabla de arriba.
-    nombres = curva["nombre"].tolist()
+    nombres = nombres_orden_fras
     codigos = dict(zip(curva["nombre"], curva["codigo"]))
     dias_por_bono = {n: int(curva[curva["nombre"] == n]["dias_vto"].iloc[0]) for n in nombres}
     anios_al_vto = {n: dias_por_bono[n] / 365 for n in nombres}
