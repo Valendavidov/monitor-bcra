@@ -790,22 +790,27 @@ with tab_fras:
         })
     input_df = pd.DataFrame(input_rows)
 
+    # Streamlit deja pintar con pandas.Styler las columnas de un
+    # data_editor, pero SOLO las que son de solo lectura (a las editables
+    # no se les puede tocar el fondo - documentado asi por Streamlit). Por
+    # eso la manera de resaltar "yield_semianual" como la unica columna
+    # editable es al reves: apagar/grisar las otras tres, para que esa
+    # quede en contraste (mas clara/normal) y se note que es la que se
+    # puede tipear.
+    def _gris_solo_lectura(_):
+        return "background-color: #171B21; color: #6B7078;"
+
+    input_styler = input_df.style.map(_gris_solo_lectura, subset=["bono", "dias_vto", "yield_anual"])
+
     input_edited = st.data_editor(
-        input_df,
+        input_styler,
         use_container_width=True,
         hide_index=True,
         disabled=["bono", "dias_vto", "yield_anual"],
         column_config={
             "bono": st.column_config.TextColumn("BONO"),
             "dias_vto": st.column_config.TextColumn("DÍAS AL VTO"),
-            # yield_semianual es la unica columna editable (el yield anual
-            # se recalcula solo a partir de ella, mas abajo) - el icono y
-            # el "(EDITABLE)" en el titulo la resaltan para que se note
-            # cual es el input, ya que el editor no permite pintarle el
-            # fondo a una sola columna (se dibuja en un canvas, no en HTML).
-            "yield_semianual": st.column_config.NumberColumn(
-                "✏️ YIELD SEMIANUAL % (EDITABLE)", format="localized"
-            ),
+            "yield_semianual": st.column_config.NumberColumn("YIELD SEMIANUAL %", format="localized"),
             "yield_anual": st.column_config.NumberColumn("YIELD ANUAL %", format="localized"),
         },
         key=f"fras_editor_{fra_key_suffix}",
@@ -838,54 +843,74 @@ with tab_fras:
         yj = y_anual_por_nodo[nodo_j] / 100
         return (((1 + yj) ** tj / (1 + yi) ** ti) ** (1 / (tj - ti)) - 1) * 100
 
-    def armar_matriz(tipo: str) -> pd.DataFrame:
+    def armar_matriz(tipo: str):
         """tipo: 'semianual' o 'anual'. Solo se completan las celdas donde
         el vencimiento de la columna es posterior al de la fila (la parte
-        triangular superior, sin la diagonal); el resto queda NaN (vacio).
-        Devuelve numeros (float), no texto - el formato y el color se
-        aplican despues, al mostrar (ver _mostrar_matriz)."""
-        filas = []
+        triangular superior, sin la diagonal); el resto queda vacio.
+
+        Devuelve dos DataFrames del mismo tamaño/indice:
+          - texto: lo que se ve en pantalla (numeros ya formateados con
+            punto decimal, o "" en las celdas que no aplican). Nunca lleva
+            NaN - si se deja un NaN en un DataFrame que despues se muestra
+            con st.dataframe, el render se lo come `None` en pantalla en
+            vez de dejarlo en blanco, que es justo lo que no queremos.
+          - crudo: los mismos numeros SIN formatear (o None), solo para
+            calcular el color de cada celda en _mostrar_matriz.
+        """
+        filas_texto, filas_crudo = [], []
         for i, ni in enumerate(nodos):
-            fila = []
+            fila_t, fila_c = [], []
             for j, nj in enumerate(nodos):
                 if j <= i:
-                    fila.append(float("nan"))
+                    fila_t.append("")
+                    fila_c.append(None)
                 else:
                     fwd_anual = forward_anual_pct(ni, nj)
-                    if tipo == "anual":
-                        fila.append(fwd_anual)
-                    else:
-                        fila.append(((1 + fwd_anual / 100) ** 0.5 - 1) * 100)
-            filas.append(fila)
-        return pd.DataFrame(filas, columns=etiquetas, index=etiquetas)
+                    valor = fwd_anual if tipo == "anual" else ((1 + fwd_anual / 100) ** 0.5 - 1) * 100
+                    fila_t.append(f"{valor:.{DEC}f}")
+                    fila_c.append(valor)
+            filas_texto.append(fila_t)
+            filas_crudo.append(fila_c)
+        texto = pd.DataFrame(filas_texto, columns=etiquetas, index=etiquetas)
+        crudo = pd.DataFrame(filas_crudo, columns=etiquetas, index=etiquetas)
+        return texto, crudo
 
     # Semaforo verde-amarillo-rojo: la tasa mas baja de la matriz queda
     # verde, la mas alta queda roja, y todo lo del medio se interpola. Las
-    # tasas fwd se muestran con PUNTO decimal (no coma, a diferencia del
-    # resto de la app) porque asi las pidio el usuario para esta tabla en
-    # particular - son porcentajes que se leen mejor "a la Bloomberg".
+    # celdas que no aplican (j <= i) quedan pintadas de gris solido, no
+    # solo con texto oscuro, para que se note de un vistazo que estan
+    # deshabilitadas. Las tasas fwd van con punto decimal, igual que el
+    # resto de la app (coma de miles / punto decimal).
     _VERDE, _AMARILLO, _ROJO = (46, 204, 113), (241, 196, 15), (231, 76, 60)
+    _GRIS_VACIO = "background-color: #1A1E24; color: #3A3F47;"
 
     def _interp(c1, c2, f):
         return tuple(int(c1[k] + (c2[k] - c1[k]) * f) for k in range(3))
 
-    def _mostrar_matriz(df: pd.DataFrame):
-        valores = df.to_numpy(dtype=float)
-        validos = valores[~pd.isna(valores)]
-        lo, hi = (float(validos.min()), float(validos.max())) if len(validos) else (0.0, 1.0)
+    def _mostrar_matriz(texto: pd.DataFrame, crudo: pd.DataFrame):
+        # OJO: pandas convierte los None a NaN solo con construir el
+        # DataFrame (columna numerica), asi que hay que chequear con
+        # pd.isna() y no con "is None" mas abajo.
+        validos = [v for fila in crudo.to_numpy().tolist() for v in fila if not pd.isna(v)]
+        lo, hi = (min(validos), max(validos)) if validos else (0.0, 1.0)
 
         def _color(v):
             if pd.isna(v):
-                return "color: #3A3F47;"
+                return _GRIS_VACIO
             frac = 0.5 if hi == lo else min(max((v - lo) / (hi - lo), 0.0), 1.0)
             rgb = _interp(_VERDE, _AMARILLO, frac / 0.5) if frac <= 0.5 else _interp(_AMARILLO, _ROJO, (frac - 0.5) / 0.5)
             return f"background-color: rgb{rgb}; color: #14181F; font-weight: 600;"
 
-        styled = df.style.map(_color).format(lambda v: "" if pd.isna(v) else f"{v:.{DEC}f}")
-        st.dataframe(styled, use_container_width=True)
+        # crudo.map(_color) arma una grilla de estilos CSS del mismo
+        # tamaño que "texto"; Styler.apply(axis=None) la aplica celda a
+        # celda sobre el DataFrame de texto (que es el que efectivamente
+        # se muestra), sin tener que mezclar numeros y strings en una
+        # sola tabla.
+        estilos = crudo.map(_color)
+        st.dataframe(texto.style.apply(lambda _: estilos, axis=None), use_container_width=True)
 
     st.markdown("#### Matriz de forwards — tasa semianual")
-    _mostrar_matriz(armar_matriz("semianual"))
+    _mostrar_matriz(*armar_matriz("semianual"))
 
     st.markdown("#### Matriz de forwards — tasa anual")
-    _mostrar_matriz(armar_matriz("anual"))
+    _mostrar_matriz(*armar_matriz("anual"))
