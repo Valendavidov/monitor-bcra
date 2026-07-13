@@ -13,11 +13,13 @@ Como esta organizado el archivo (de arriba hacia abajo):
     2. CSS: la identidad visual (paleta por pais, mayusculas, fuente).
     3. Funciones auxiliares: cargar/guardar el universo de bonos, armar un
        objeto Bond a partir de una fila de la tabla, filtrar por categoria.
-    4. Tres tabs, cada uno una seccion independiente:
+    4. Cuatro tabs, cada uno una seccion independiente:
          - Cashflows: ver el calendario de pagos futuros de un bono.
          - YAS (estilo Bloomberg): pricear UN bono a la vez, precio<->yield.
          - Monitor de bonos: editar el universo completo y comparar todos
            los bonos juntos con precios/yields bid y offer.
+         - FRAs: a partir de los yields spot de toda la curva, calcular las
+           tasas forward implicitas entre cada par de vencimientos.
 
 Nota sobre Streamlit para quien no lo conozca: Streamlit no funciona como
 una pagina web tradicional. Cada vez que el usuario toca un control (tipea
@@ -334,7 +336,7 @@ if registry.empty:
     st.warning("El universo de bonos esta vacio. Anda a la tab 'Monitor de bonos' para cargar uno.")
     st.stop()
 
-tab_cashflow, tab_yas, tab_monitor = st.tabs(["Cashflows", "YAS", "Monitor de bonos"])
+tab_cashflow, tab_yas, tab_monitor, tab_fras = st.tabs(["Cashflows", "YAS", "Monitor de bonos", "FRAs"])
 
 
 # =============================================================================
@@ -694,3 +696,140 @@ with tab_monitor:
         st.session_state[px_offer_key][n] = px_offer
         st.session_state[yld_bid_key][n] = yield_bid
         st.session_state[yld_offer_key][n] = yield_offer
+
+
+# =============================================================================
+# TAB 4: FRAs (tasas forward implicitas)
+# =============================================================================
+# A partir de un yield spot semianual por bono (que el usuario tipea), esta
+# tab arma dos matrices triangulares de tasas forward: cuanto rendiria, hoy,
+# un compromiso a futuro que arranca en el vencimiento del bono "i" y
+# termina en el vencimiento del bono "j" (con j posterior a i). Es la misma
+# logica que un FRA de tasas: la tasa forward implicita se despeja de la
+# curva spot, no se inventa ni se tipea a mano.
+#
+# Nodo "HOY": se agrega como un vencimiento mas, con 0 dias/0 años. Matematicamente
+# la formula de forward con ti=0 da como resultado exactamente el yield spot del
+# otro bono (cualquier numero elevado a la 0 es 1), asi que no hace falta un caso
+# especial para la primera fila: "HOY" funciona como cualquier otro nodo de la curva.
+with tab_fras:
+    st.subheader("FRAs — tasas forward implícitas")
+    st.caption(
+        "Ingresá el yield semianual spot de cada bono de la curva; el yield anual y las "
+        "dos matrices de forwards (semianual y anual) se recalculan solas."
+    )
+
+    # Para Uruguay hay que elegir UNA curva completa (UI o Globales) - a
+    # diferencia de filtrar_por_categoria() de mas arriba, aca no existe
+    # una opcion "Todas" porque no tiene sentido mezclar dos curvas
+    # distintas en una misma matriz de forwards. Para Paraguay, que solo
+    # tiene una categoria, no se muestra ningun selector.
+    if "categoria" in registry.columns and registry["categoria"].nunique() > 1:
+        categorias_fra = sorted(registry["categoria"].unique().tolist())
+        cat_fra = st.radio("Curva", categorias_fra, horizontal=True, key="fras_categoria")
+        curva = registry[registry["categoria"] == cat_fra].copy()
+        fra_key_suffix = f"{pais}_{cat_fra}"
+    else:
+        curva = registry.copy()
+        fra_key_suffix = pais
+
+    hoy = date.today()
+    curva["dias_vto"] = curva["maturity"].apply(lambda m: (m - hoy).days)
+    curva = curva.sort_values("dias_vto").reset_index(drop=True)
+
+    # st.session_state guarda el yield semianual tipeado por bono, para que
+    # sobreviva entre corridas del script (cada edicion de celda hace
+    # correr todo el archivo de nuevo). La primera vez que aparece un bono
+    # en esta tab, se arranca con el ultimo yield que se tipeo para el en
+    # la tab YAS (mejor punto de partida que un numero fijo arbitrario).
+    fras_yield_key = f"fras_yield_{fra_key_suffix}"
+    st.session_state.setdefault(fras_yield_key, {})
+    for n in curva["nombre"]:
+        if n not in st.session_state[fras_yield_key]:
+            st.session_state[fras_yield_key][n] = cargar_ultimo_yield(n)
+
+    st.markdown("#### Yields spot")
+    input_rows = []
+    for _, row in curva.iterrows():
+        n = row["nombre"]
+        yld_semi = st.session_state[fras_yield_key][n]
+        yld_anual = ((1 + yld_semi / 100) ** 2 - 1) * 100
+        input_rows.append({
+            "bono": n,
+            "dias_vto": int(row["dias_vto"]),
+            "yield_semianual": round(yld_semi, DEC),
+            "yield_anual": round(yld_anual, DEC),
+        })
+    input_df = pd.DataFrame(input_rows)
+
+    input_edited = st.data_editor(
+        input_df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=["bono", "dias_vto", "yield_anual"],
+        column_config={
+            "bono": st.column_config.TextColumn("BONO"),
+            "dias_vto": st.column_config.NumberColumn("DÍAS AL VTO"),
+            # yield_semianual es la unica columna editable: el yield anual
+            # se recalcula solo a partir de ella, mas abajo.
+            "yield_semianual": st.column_config.NumberColumn("YIELD SEMIANUAL %", format="localized"),
+            "yield_anual": st.column_config.NumberColumn("YIELD ANUAL %", format="localized"),
+        },
+        key=f"fras_editor_{fra_key_suffix}",
+    )
+
+    for _, row in input_edited.iterrows():
+        st.session_state[fras_yield_key][row["bono"]] = float(row["yield_semianual"])
+
+    # A partir de aca se arma la curva de nodos que alimenta las dos
+    # matrices: "HOY" (t=0, punto de partida) mas un nodo por bono, en el
+    # mismo orden (ascendente por vencimiento) que la tabla de arriba.
+    nombres = curva["nombre"].tolist()
+    codigos = dict(zip(curva["nombre"], curva["codigo"]))
+    yield_semi = {n: st.session_state[fras_yield_key][n] for n in nombres}
+    yield_anual_pct = {n: ((1 + yield_semi[n] / 100) ** 2 - 1) * 100 for n in nombres}
+    anios_al_vto = {n: int(curva[curva["nombre"] == n]["dias_vto"].iloc[0]) / 365 for n in nombres}
+
+    nodos = ["HOY"] + nombres
+    etiquetas = ["HOY"] + [codigos[n] for n in nombres]
+    t_por_nodo = {"HOY": 0.0, **anios_al_vto}
+    y_anual_por_nodo = {"HOY": 0.0, **yield_anual_pct}  # el 0.0 de HOY no afecta el resultado (ver nota arriba)
+
+    def forward_anual_pct(nodo_i: str, nodo_j: str) -> float:
+        """Tasa forward anual implicita entre el vencimiento de nodo_i y el
+        de nodo_j (nodo_j tiene que vencer despues). Si nodo_i es "HOY"
+        (ti=0), el resultado da exactamente el yield anual spot de
+        nodo_j - no hace falta tratarlo distinto."""
+        ti, tj = t_por_nodo[nodo_i], t_por_nodo[nodo_j]
+        yi = y_anual_por_nodo[nodo_i] / 100
+        yj = y_anual_por_nodo[nodo_j] / 100
+        return (((1 + yj) ** tj / (1 + yi) ** ti) ** (1 / (tj - ti)) - 1) * 100
+
+    def armar_matriz(tipo: str) -> pd.DataFrame:
+        """tipo: 'semianual' o 'anual'. Solo se completan las celdas donde
+        el vencimiento de la columna es posterior al de la fila (la parte
+        triangular superior, sin la diagonal); el resto queda vacio."""
+        filas = []
+        for i, ni in enumerate(nodos):
+            fila = []
+            for j, nj in enumerate(nodos):
+                if j <= i:
+                    fila.append("")
+                else:
+                    fwd_anual = forward_anual_pct(ni, nj)
+                    if tipo == "anual":
+                        fila.append(fmt_es(fwd_anual))
+                    else:
+                        fwd_semi = ((1 + fwd_anual / 100) ** 0.5 - 1) * 100
+                        fila.append(fmt_es(fwd_semi))
+            filas.append(fila)
+        return pd.DataFrame(filas, columns=etiquetas, index=etiquetas)
+
+    def _pintar_vacias(v):
+        return "color: #3A3F47;" if v == "" else ""
+
+    st.markdown("#### Matriz de forwards — tasa semianual")
+    st.dataframe(armar_matriz("semianual").style.map(_pintar_vacias), use_container_width=True)
+
+    st.markdown("#### Matriz de forwards — tasa anual")
+    st.dataframe(armar_matriz("anual").style.map(_pintar_vacias), use_container_width=True)
