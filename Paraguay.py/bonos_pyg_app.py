@@ -1065,7 +1065,7 @@ with tab_ndf:
     with col_izq:
         st.markdown("#### Fechas")
         dia_operado = st.date_input("Día operado (trade date)", value=date.today(), key="ndf_trade_date")
-        fecha_fixing = st.date_input("Fecha de fixing", value=date.today(), key="ndf_fixing")
+        fecha_fixing = st.date_input("Fixing Date", value=date.today(), key="ndf_fixing")
 
         # Value date = fixing + 2 dias habiles, saltando fines de semana Y
         # feriados de EEUU (el NDF liquida en USD) mas los del pais que
@@ -1074,10 +1074,12 @@ with tab_ndf:
         fecha_valuta = sumar_dias_habiles(fecha_fixing, 2, codigos_feriados)
         st.markdown('<div class="yas-label">VALUE DATE</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="yas-value">{fecha_valuta}</div>', unsafe_allow_html=True)
-        st.caption(f"Fixing + 2 días hábiles (feriados de {pais} + EEUU).")
+        st.caption(f"Fixing Date + 2 días hábiles (feriados de {pais} + EEUU).")
 
-        hasta = st.radio("Días al vencimiento hasta", ["Fixing", "Value Date"], horizontal=True, key="ndf_dias_hasta")
-        fecha_referencia = fecha_fixing if hasta == "Fixing" else fecha_valuta
+        hasta = st.radio(
+            "Días al vencimiento hasta", ["Fixing Date", "Value Date"], horizontal=True, key="ndf_dias_hasta",
+        )
+        fecha_referencia = fecha_fixing if hasta == "Fixing Date" else fecha_valuta
         dias = (fecha_referencia - dia_operado).days
         st.markdown('<div class="yas-label">DÍAS AL VENCIMIENTO</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="yas-value">{dias}</div>', unsafe_allow_html=True)
@@ -1111,7 +1113,7 @@ with tab_ndf:
     st.markdown("#### Cálculo")
 
     if spot <= 0 or dias <= 0:
-        st.caption("Ingresá un spot y una fecha de fixing/value date válidos (posteriores al día operado) para calcular.")
+        st.caption("Ingresá un spot y una Fixing Date/Value Date válidas (posteriores al día operado) para calcular.")
     else:
         modo_calculo = st.radio(
             "Ingresar por", ["Yield", "Precio futuro"], horizontal=True, key="ndf_modo_calculo",
