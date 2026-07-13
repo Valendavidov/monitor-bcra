@@ -346,22 +346,6 @@ def make_bond(row: pd.Series) -> Bond:
     )
 
 
-def resaltar_columnas_editables(df: pd.DataFrame, columnas_solo_lectura: list):
-    """Devuelve un pandas.Styler que apaga (gris oscuro) las columnas de
-    solo lectura de una tabla, para que las que SI se pueden tipear
-    queden claras por contraste con el resto.
-
-    Streamlit deja pintar con Styler las columnas de un st.data_editor,
-    pero solo las que son de solo lectura - a las editables no se les
-    puede tocar el fondo (esta documentado asi en la propia libreria). Por
-    eso el camino es al reves: en vez de resaltar la columna editable,
-    se apagan todas las demas.
-    """
-    def _gris(_):
-        return "background-color: #171B21; color: #6B7078;"
-
-    return df.style.map(_gris, subset=columnas_solo_lectura)
-
 
 def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
     """Si el universo tiene mas de una 'categoria' (Uruguay separa sus
@@ -774,7 +758,13 @@ with tab_monitor:
     else:
         disabled_cols = campos_fijos + ["px_bid", "px_offer"]
 
-    tabla_styler = resaltar_columnas_editables(tabla_df[columnas_orden], disabled_cols)
+    # OJO: NO envolver tabla_df en un pandas.Styler para "apagar" columnas
+    # de solo lectura (se probo antes) - Streamlit solo mantiene el estado
+    # del editor si el Styler que se le pasa es el MISMO objeto entre
+    # corridas; como este se reconstruye en cada corrida, el editor entero
+    # se "reiniciaba" de cero, lo que ademas rompe el copy-paste desde
+    # Excel. Se prioriza que el copy-paste funcione bien por sobre el
+    # resaltado visual de la columna editable.
 
     # Orden estable de bonos (coincide con el de "monitor_universe"/tabla_df)
     # para mapear el indice de fila que devuelve el editor a un nombre de
@@ -814,7 +804,7 @@ with tab_monitor:
                     st.session_state[px_offer_key][n] = b.price_to_worst(yield_offer, mesa_settlement)
 
     st.data_editor(
-        tabla_styler,
+        tabla_df[columnas_orden],
         use_container_width=True,
         hide_index=True,
         disabled=disabled_cols,
@@ -916,7 +906,11 @@ with tab_fras:
         })
     input_df = pd.DataFrame(input_rows)
 
-    input_styler = resaltar_columnas_editables(input_df, ["bono", "dias_vto", "yield_anual", "tna"])
+    # OJO: NO envolver input_df en un pandas.Styler para "apagar" columnas
+    # de solo lectura (se probo antes) - rompe la statefulness del editor
+    # (Streamlit lo recrea de cero en cada corrida si el Styler no es el
+    # mismo objeto) y con eso el copy-paste desde Excel. Se prioriza que
+    # el copy-paste funcione por sobre el resaltado visual.
 
     # Orden estable de bonos (coincide con el de "curva"/input_df) para
     # poder mapear el indice de fila que devuelve el editor a un nombre de
@@ -938,7 +932,7 @@ with tab_fras:
                 st.session_state[fras_yield_key][n] = float(cambios["yield_semianual"])
 
     st.data_editor(
-        input_styler,
+        input_df,
         use_container_width=True,
         hide_index=True,
         disabled=["bono", "dias_vto", "yield_anual", "tna"],
