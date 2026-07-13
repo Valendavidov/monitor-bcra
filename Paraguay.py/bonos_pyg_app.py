@@ -133,6 +133,36 @@ PAISES = {
 
 st.set_page_config(page_title="Monitor de Bonos Soberanos", layout="wide")
 
+
+def _password_ok() -> bool:
+    """Muestra un cuadro de contraseña y no deja ver el resto de la app
+    hasta que se tipee la correcta. La contraseña vive en `st.secrets`
+    (archivo `.streamlit/secrets.toml` local, o la seccion "Secrets" del
+    dashboard de Streamlit Cloud) - nunca en el codigo ni en git, para que
+    no quede expuesta en el repo publico.
+
+    `st.session_state["password_ok"]` guarda el resultado entre corridas:
+    una vez tipeada bien, no hay que volver a tipearla en cada interaccion
+    con la app (cada click/edicion hace correr el script de nuevo).
+    """
+    if st.session_state.get("password_ok"):
+        return True
+
+    st.title("Monitor de Bonos Soberanos")
+    pw = st.text_input("Contraseña", type="password", key="password_input")
+    if pw:
+        if pw == st.secrets.get("app_password", ""):
+            st.session_state["password_ok"] = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta.")
+    return False
+
+
+if not _password_ok():
+    st.stop()
+
+
 # Selector de pais: es lo primero que se dibuja en la pagina. Determina que
 # archivo CSV se carga y que paleta de colores se usa mas abajo.
 pais = st.radio("País", list(PAISES.keys()), horizontal=True, key="pais_selector")
