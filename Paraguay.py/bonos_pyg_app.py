@@ -521,15 +521,15 @@ with tab_yas:
     st.divider()
     st.markdown("#### Conversión de moneda")
     st.caption(
-        f"Ingresá nominales (valor nominal en USD) o un monto en {MONEDA}, más el tipo de "
+        f"Ingresá una cantidad (valor nominal en USD) o un monto en {MONEDA}, más el tipo de "
         "cambio, y calcula lo que falta (incluido el equivalente en USD)."
     )
 
     # precio_sucio esta cotizado en USD por cada 100 de nominal (valor
-    # nominal / face). "Nominales" es cuanto valor nominal en USD tenes o
+    # nominal / face). "Cantidad" es cuanto valor nominal en USD tenes o
     # queres comprar (ej. 10.000 = USD 10.000 de nominal, no 10.000 bonos).
     modo_fx = st.radio(
-        "Ingresar por", ["Nominales (USD)", f"Monto en {MONEDA}"],
+        "Ingresar por", ["Cantidad", f"Monto en {MONEDA}"],
         horizontal=True, key="yas_fx_modo",
     )
 
@@ -541,17 +541,19 @@ with tab_yas:
         )
 
     usd_consideracion = None
-    nominales = None
+    cantidad = None
     monto_local = None
 
-    if modo_fx == "Nominales (USD)":
+    if modo_fx == "Cantidad":
         with col_fx1:
-            nominales = st.number_input(
-                "Nominales (valor nominal, USD)", min_value=0.0, value=100.0, step=100.0,
+            cantidad = st.number_input(
+                "Cantidad (valor nominal, USD)", min_value=0.0, value=100.0, step=100.0,
                 format=f"%.{DEC}f", key="yas_nominales",
             )
-        # precio_sucio/100 = cuanto USD cuesta cada USD 1 de nominal.
-        usd_consideracion = summary["precio_sucio"] / 100 * nominales
+        # precio_sucio/100 = cuanto USD cuesta cada USD 1 de nominal - el
+        # monto en moneda local sale de multiplicar esa consideracion en
+        # USD por el tipo de cambio.
+        usd_consideracion = summary["precio_sucio"] / 100 * cantidad
         if tipo_cambio > 0:
             monto_local = usd_consideracion * tipo_cambio
     else:
@@ -562,15 +564,15 @@ with tab_yas:
             )
         if tipo_cambio > 0:
             usd_consideracion = monto_local / tipo_cambio
-            nominales = usd_consideracion / (summary["precio_sucio"] / 100)
+            cantidad = usd_consideracion / (summary["precio_sucio"] / 100)
 
     def _valor_o_guion(v):
         return fmt_es(v) if v is not None else "—"
 
     g_fx1, g_fx2, g_fx3 = st.columns(3)
     with g_fx1:
-        st.markdown('<div class="yas-label">NOMINALES (USD)</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="yas-value">{_valor_o_guion(nominales)}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="yas-label">CANTIDAD</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="yas-value">{_valor_o_guion(cantidad)}</div>', unsafe_allow_html=True)
     with g_fx2:
         st.markdown(f'<div class="yas-label">MONTO EN {MONEDA}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="yas-value">{_valor_o_guion(monto_local)}</div>', unsafe_allow_html=True)
