@@ -568,6 +568,17 @@ def calcular_tasa_operada(nombre_bono: str, px, settlement: date, registry_uy: p
         return None
 
 
+def codigo_o_descripcion(nombre_bono: str, registry_uy: pd.DataFrame) -> str:
+    """Para la columna "Bono" de Ops Historicas: si nombre_bono matcheo
+    contra el universo conocido, se muestra el codigo corto (ej. "UYU 35",
+    "UI 2040") en vez del nombre completo. Si no matcheo (parsear_bevsa/
+    parsear_externas dejaron la descripcion cruda de la fuente porque no
+    encontraron un bono correspondiente), se muestra esa descripcion tal
+    cual - no hay codigo para algo que no esta en nuestro universo."""
+    fila = registry_uy[registry_uy["nombre"] == nombre_bono]
+    return fila.iloc[0]["codigo"] if not fila.empty else nombre_bono
+
+
 registry = load_registry()
 
 if registry.empty:
@@ -1345,7 +1356,7 @@ if pais == "Uruguay":
                     tasa = calcular_tasa_operada(row["nombre_bono"], row["px"], row["settlement"], registry)
                     filas_out.append({
                         "entidad": row["entidad"],
-                        "bono": row["nombre_bono"],
+                        "bono": codigo_o_descripcion(row["nombre_bono"], registry),
                         "nominales_operados": fmt_es(row["nominales"]) if row["nominales"] is not None else "—",
                         "tasa_operada_pct": fmt_es(tasa) if tasa is not None else "—",
                         "usd_operados": fmt_es(row["usd"]) if row["usd"] is not None else "—",
