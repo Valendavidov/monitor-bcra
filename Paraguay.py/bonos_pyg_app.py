@@ -70,6 +70,13 @@ CALLS_PATH = os.path.join(BASE_DIR, "bonos_calls.csv")
 # aparecen aca pagan el 100% del capital de golpe al vencimiento.
 AMORTIZACION_PATH = os.path.join(BASE_DIR, "bonos_amortizacion.csv")
 
+# Historico de operaciones de la tab "Ops Historicas" (Uruguay): a
+# diferencia de yas_ultimos_yields.json, este SI se commitea al repo (no
+# esta en .gitignore) - es justamente el registro que se quiere conservar
+# dia a dia, y Streamlit Cloud borra cualquier archivo que no este en git
+# cada vez que se hace un deploy nuevo.
+OPS_HIST_PATH = os.path.join(BASE_DIR, "ops_historicas_uy.csv")
+
 
 # =============================================================================
 # 1) CONFIGURACION GENERAL
@@ -577,6 +584,50 @@ def codigo_o_descripcion(nombre_bono: str, registry_uy: pd.DataFrame) -> str:
     cual - no hay codigo para algo que no esta en nuestro universo."""
     fila = registry_uy[registry_uy["nombre"] == nombre_bono]
     return fila.iloc[0]["codigo"] if not fila.empty else nombre_bono
+
+
+COLUMNAS_HIST_OPS = [
+    "fecha", "entidad", "bono", "nominales_operados", "tasa_operada_pct", "usd_operados", "px_operado",
+]
+
+
+def cargar_historico_ops() -> pd.DataFrame:
+    """Lee el historico de Ops Historicas (Uruguay) desde OPS_HIST_PATH.
+    Si todavia no se guardo ningun dia, devuelve un DataFrame vacio con
+    las columnas correctas (para que el resto del codigo no tenga que
+    distinguir el caso "vacio" del caso "con datos")."""
+    if not os.path.exists(OPS_HIST_PATH):
+        return pd.DataFrame(columns=COLUMNAS_HIST_OPS)
+    df = pd.read_csv(OPS_HIST_PATH)
+    df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
+    return df
+
+
+def guardar_en_historico_ops(hoy_df: pd.DataFrame) -> None:
+    """Agrega las operaciones de HOY (con sus valores crudos, sin
+    formatear) al historico persistido en CSV. Si ya se habia guardado
+    algo para el dia de hoy (ej. se peg un reporte actualizado y se volvio
+    a apretar el boton), se reemplaza en vez de duplicar filas del mismo
+    dia."""
+    hoy = date.today()
+    nuevo = hoy_df.copy()
+    nuevo.insert(0, "fecha", hoy)
+    existente = cargar_historico_ops()
+    existente = existente[existente["fecha"] != hoy]
+    combinado = pd.concat([existente, nuevo], ignore_index=True)
+    combinado.to_csv(OPS_HIST_PATH, index=False)
+
+
+def formatear_tabla_ops(df: pd.DataFrame) -> pd.DataFrame:
+    """Copia de df (tabla de Ops Historicas, cruda) con los numeros ya
+    formateados (coma de miles, punto decimal - igual que el resto de la
+    app) para mostrar con st.dataframe; "—" donde falta un dato (ej. no
+    se pudo calcular la tasa porque el bono no matcheo)."""
+    out = df.copy()
+    decimales = {"nominales_operados": DEC, "tasa_operada_pct": DEC, "usd_operados": DEC, "px_operado": 4}
+    for col, dec in decimales.items():
+        out[col] = out[col].apply(lambda v: fmt_es(v, decimales=dec) if pd.notna(v) else "—")
+    return out
 
 
 registry = load_registry()
@@ -1351,27 +1402,59 @@ if pais == "Uruguay":
             if combinada.empty:
                 st.caption("Pegá el reporte de BEVSA y/o de Externas arriba para ver la tabla combinada.")
             else:
-                filas_out = []
+                filas_crudas = []
                 for _, row in combinada.iterrows():
                     tasa = calcular_tasa_operada(row["nombre_bono"], row["px"], row["settlement"], registry)
-                    filas_out.append({
+                    filas_crudas.append({
                         "entidad": row["entidad"],
                         "bono": codigo_o_descripcion(row["nombre_bono"], registry),
-                        "nominales_operados": fmt_es(row["nominales"]) if row["nominales"] is not None else "—",
-                        "tasa_operada_pct": fmt_es(tasa) if tasa is not None else "—",
-                        "usd_operados": fmt_es(row["usd"]) if row["usd"] is not None else "—",
-                        "px_operado": fmt_es(row["px"], decimales=4) if row["px"] is not None else "—",
+                        "nominales_operados": row["nominales"],
+                        "tasa_operada_pct": tasa,
+                        "usd_operados": row["usd"],
+                        "px_operado": row["px"],
                     })
-                tabla_out = (
-                    pd.DataFrame(filas_out)
+                hoy_df = (
+                    pd.DataFrame(filas_crudas)
                     .sort_values(["bono", "entidad"])
                     .reset_index(drop=True)
                 )
                 st.dataframe(
-                    tabla_out,
+                    formatear_tabla_ops(hoy_df),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
+                        "entidad": st.column_config.TextColumn("ENTIDAD"),
+                        "bono": st.column_config.TextColumn("BONO"),
+                        "nominales_operados": st.column_config.TextColumn("NOMINALES OPERADOS"),
+                        "tasa_operada_pct": st.column_config.TextColumn("TASA OPERADA (%)"),
+                        "usd_operados": st.column_config.TextColumn("USD OPERADOS"),
+                        "px_operado": st.column_config.TextColumn("PX OPERADO"),
+                    },
+                )
+
+                if st.button("💾 Guardar en histórico", key="ops_guardar_historico"):
+                    guardar_en_historico_ops(hoy_df)
+                    st.success(
+                        f"Guardado en el histórico para hoy ({date.today()}). Para que este guardado "
+                        "sobreviva al próximo redeploy, pedile a Claude que haga commit y push de "
+                        "ops_historicas_uy.csv."
+                    )
+
+            st.divider()
+            st.markdown("#### Histórico")
+            historico_df = cargar_historico_ops()
+            if historico_df.empty:
+                st.caption("Todavía no guardaste ningún día en el histórico (usá el botón de arriba).")
+            else:
+                historico_mostrado = historico_df.sort_values(
+                    ["fecha", "bono", "entidad"], ascending=[False, True, True]
+                ).reset_index(drop=True)
+                st.dataframe(
+                    formatear_tabla_ops(historico_mostrado),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "fecha": st.column_config.DateColumn("FECHA"),
                         "entidad": st.column_config.TextColumn("ENTIDAD"),
                         "bono": st.column_config.TextColumn("BONO"),
                         "nominales_operados": st.column_config.TextColumn("NOMINALES OPERADOS"),
