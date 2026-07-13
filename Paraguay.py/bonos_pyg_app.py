@@ -35,6 +35,7 @@ Uso:
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import date, timedelta
 
@@ -50,6 +51,10 @@ import streamlit as st
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
+
+# Raiz del repo (un nivel arriba de Paraguay.py/) - se usa para correr los
+# comandos de git al sincronizar el historico de Ops Historicas con GitHub.
+REPO_ROOT = os.path.dirname(BASE_DIR)
 
 from bond_model import Bond
 
@@ -427,6 +432,33 @@ def ndf_px_futuro(spot: float, yield_pct: float, sofr_pct: float, dias: int) -> 
     return (spot * (1 + y * dias / 365)) / (1 + sofr * dias / 365)
 
 
+def seccion_sofr(key_prefix: str) -> float:
+    """Dibuja el selector Automático/Override manual de SOFR (con el
+    valor de la API del NY Fed mostrado si esta disponible) y devuelve la
+    tasa resuelta en %. La usan tanto la tab NDF como la sub-seccion NDF
+    de Ops Historicas - key_prefix evita que los widgets de ambas
+    colisionen entre si."""
+    sofr_api_pct, sofr_fecha = obtener_sofr()
+
+    modo_sofr = st.radio(
+        "Fuente SOFR", ["Automático (API NY Fed)", "Override manual"], key=f"{key_prefix}_modo_sofr",
+    )
+
+    if modo_sofr == "Override manual" or sofr_api_pct is None:
+        if sofr_api_pct is None:
+            st.warning(
+                "No se pudo obtener el SOFR desde la API del NY Fed (revisá la conexión). "
+                "Usá el override manual mientras tanto."
+            )
+        return st.number_input(
+            "SOFR manual (%)", value=0.0, step=0.01, format=f"%.{DEC}f", key=f"{key_prefix}_sofr_manual",
+        )
+
+    st.markdown('<div class="yas-label">SOFR (' + str(sofr_fecha) + ')</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="yas-value">{fmt_es(sofr_api_pct)}%</div>', unsafe_allow_html=True)
+    return sofr_api_pct
+
+
 # ---------------------------------------------------------------------------
 # Ops Historicas (Uruguay): parseo de los reportes BEVSA / Externas que se
 # pegan a mano en un textarea, para armar una tabla combinada de operaciones
@@ -559,6 +591,49 @@ def parsear_externas(texto: str, registry_uy: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(filas)
 
 
+def parsear_bevsa_cambios(texto: str):
+    """Parsea el reporte BEVSA - Mercado Cambios pegado a mano (mismas 12
+    columnas que el reporte de bonos de BEVSA: INSTRUMENTO, PLAZO,
+    CANTIDAD, MONTO TRANS. U$S, N° TRANS., PRECIO MAYOR, PRECIO MENOR,
+    PRECIO MEDIO, PRECIO ÚLTIMO, PRECIO CIERRE, COND, VAR. %).
+
+    La fila "DOLAR" a secas es el spot del dia (su PRECIO CIERRE es la
+    cotizacion de contado). Las filas "DOLAR <mes> <fecha>" son los NDFs -
+    su PRECIO CIERRE son los PUNTOS forward, no el precio completo. La
+    fila TOTAL (y cualquier instrumento que no empiece con "DOLAR") se
+    ignora.
+
+    Devuelve (spot, filas_ndf): spot es un float (o None si no se
+    encontro la fila "DOLAR"), filas_ndf es una lista de dicts con
+    instrumento/plazo/cantidad/usd/puntos/fecha_fixing por cada NDF.
+    """
+    spot = None
+    filas_ndf = []
+    for linea in texto.splitlines():
+        celdas = _dividir_fila_pegada(linea)
+        if len(celdas) < 10:
+            continue
+        instrumento = celdas[0].strip()
+        if not instrumento.upper().startswith("DOLAR"):
+            continue
+        precio_cierre = _num_es(celdas[9])
+        if instrumento.upper() == "DOLAR":
+            spot = precio_cierre
+            continue
+        m = re.search(r"(\d{2}/\d{2}/\d{4})", instrumento)
+        if not m:
+            continue
+        filas_ndf.append({
+            "instrumento": instrumento,
+            "plazo": celdas[1],
+            "cantidad": _num_es(celdas[2]),   # CANTIDAD
+            "usd": _num_es(celdas[3]),        # MONTO TRANS. U$S
+            "puntos": precio_cierre,          # PRECIO CIERRE
+            "fecha_fixing": _fecha_es(m.group(1)),
+        })
+    return spot, filas_ndf
+
+
 def calcular_tasa_operada(nombre_bono: str, px, settlement: date, registry_uy: pd.DataFrame):
     """Yield to worst de una fila de Ops Historicas. None si el bono no
     matcheo contra el universo conocido (nombre_bono quedo con la
@@ -616,6 +691,59 @@ def guardar_en_historico_ops(hoy_df: pd.DataFrame) -> None:
     existente = existente[existente["fecha"] != hoy]
     combinado = pd.concat([existente, nuevo], ignore_index=True)
     combinado.to_csv(OPS_HIST_PATH, index=False)
+
+
+def _git(*args: str):
+    """Corre un comando git en la raiz del repo y devuelve el resultado
+    (subprocess.CompletedProcess) sin lanzar excepcion si falla - lo
+    maneja quien llama."""
+    return subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+
+
+def sincronizar_historico_con_github() -> tuple:
+    """Hace commit + push de OPS_HIST_PATH al repo de GitHub, usando un
+    Personal Access Token guardado en st.secrets["github_token"] (con
+    permiso de escritura sobre este repo). Devuelve (ok, mensaje).
+
+    Nunca fuerza el push: si el contenedor de Streamlit Cloud esta
+    desactualizado respecto al repo (por ejemplo porque se le pidio a
+    Claude otro cambio y se pusheo desde otra maquina), "git push" lo
+    rechaza solo - no se pisa ningun commit ajeno, esta funcion solo
+    reporta el rechazo como error para que la usuaria sepa que hay que
+    sincronizar a mano esa vez.
+    """
+    token = st.secrets.get("github_token")
+    if not token:
+        return False, "Falta \"github_token\" en los Secrets de Streamlit Cloud."
+
+    def _sin_token(texto: str) -> str:
+        # Nunca mostrar el token en pantalla ni en logs, aunque git lo
+        # incluya en su propio mensaje de error (pasa con URLs con token).
+        return texto.replace(token, "***") if texto else texto
+
+    ruta_relativa = os.path.relpath(OPS_HIST_PATH, REPO_ROOT)
+
+    r_add = _git("add", ruta_relativa)
+    if r_add.returncode != 0:
+        return False, f"git add falló: {_sin_token(r_add.stderr)}"
+
+    r_commit = _git(
+        "-c", "user.name=Monitor Ops Históricas",
+        "-c", "user.email=ops-historicas@monitor-bcra.local",
+        "commit", "-m", f"Actualiza histórico Ops Históricas ({date.today()})",
+    )
+    if r_commit.returncode != 0:
+        salida = (r_commit.stdout + r_commit.stderr).lower()
+        if "nothing to commit" in salida or "nada que" in salida:
+            return True, "No había cambios nuevos para subir (ya estaba sincronizado)."
+        return False, f"git commit falló: {_sin_token(r_commit.stderr or r_commit.stdout)}"
+
+    remoto = f"https://{token}@github.com/Valendavidov/monitor-bcra.git"
+    r_push = _git("push", remoto, "HEAD:main")
+    if r_push.returncode != 0:
+        return False, f"git push falló: {_sin_token(r_push.stderr)}"
+
+    return True, "Histórico sincronizado con GitHub."
 
 
 def formatear_tabla_ops(df: pd.DataFrame) -> pd.DataFrame:
@@ -1306,25 +1434,7 @@ with tab_ndf:
 
     with col_der:
         st.markdown("#### SOFR")
-        sofr_api_pct, sofr_fecha = obtener_sofr()
-
-        modo_sofr = st.radio(
-            "Fuente", ["Automático (API NY Fed)", "Override manual"], key="ndf_modo_libor",
-        )
-
-        if modo_sofr == "Override manual" or sofr_api_pct is None:
-            if sofr_api_pct is None:
-                st.warning(
-                    "No se pudo obtener el SOFR desde la API del NY Fed (revisá la conexión). "
-                    "Usá el override manual mientras tanto."
-                )
-            sofr_pct = st.number_input(
-                "SOFR manual (%)", value=0.0, step=0.01, format=f"%.{DEC}f", key="ndf_libor_manual",
-            )
-        else:
-            sofr_pct = sofr_api_pct
-            st.markdown('<div class="yas-label">SOFR (' + str(sofr_fecha) + ')</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(sofr_pct)}%</div>', unsafe_allow_html=True)
+        sofr_pct = seccion_sofr("ndf")
 
     st.divider()
     st.markdown("#### Cálculo")
@@ -1377,10 +1487,58 @@ if pais == "Uruguay":
         seccion = st.radio("Sección", ["Bonos", "NDF"], horizontal=True, key="ops_seccion")
 
         if seccion == "NDF":
-            st.caption(
-                "Próximamente - misma lógica de pegar texto → parsear → tabla calculada, "
-                "para los NDFs operados."
-            )
+            col_texto, col_sofr = st.columns([2, 1])
+            with col_texto:
+                texto_ndf = st.text_area(
+                    "Pegar reporte BEVSA - Mercado Cambios", height=200, key="ops_ndf_texto",
+                )
+                fecha_ref_ndf = st.date_input(
+                    "Fecha de referencia (para los días al fixing)", value=date.today(), key="ops_ndf_fecha_ref",
+                )
+            with col_sofr:
+                sofr_pct_ndf = seccion_sofr("ops_ndf")
+
+            st.divider()
+            st.markdown("#### Tabla combinada")
+
+            if not texto_ndf.strip():
+                st.caption("Pegá el reporte de BEVSA - Mercado Cambios arriba para ver la tabla.")
+            else:
+                spot_ndf, filas_ndf = parsear_bevsa_cambios(texto_ndf)
+                if spot_ndf is None:
+                    st.warning('No encontré la fila "DOLAR" (spot) en el texto pegado.')
+                elif not filas_ndf:
+                    st.caption('No encontré filas de NDF ("DOLAR <mes> <fecha>") en el texto pegado.')
+                else:
+                    st.caption(f"Spot de referencia (fila DOLAR): {fmt_es(spot_ndf, decimales=4)}")
+                    filas_out = []
+                    for f in filas_ndf:
+                        dias = (f["fecha_fixing"] - fecha_ref_ndf).days
+                        precio = spot_ndf + f["puntos"]
+                        yld = ndf_yield_pct(spot_ndf, precio, sofr_pct_ndf, dias) if dias > 0 else None
+                        filas_out.append({
+                            "instrumento": f["instrumento"],
+                            "plazo": f["plazo"],
+                            "cantidad": fmt_es(f["cantidad"]) if f["cantidad"] is not None else "—",
+                            "usd": fmt_es(f["usd"]) if f["usd"] is not None else "—",
+                            "precio": fmt_es(precio, decimales=4),
+                            "puntos": fmt_es(f["puntos"], decimales=4),
+                            "yield_pct": fmt_es(yld) if yld is not None else "—",
+                        })
+                    st.dataframe(
+                        pd.DataFrame(filas_out),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "instrumento": st.column_config.TextColumn("INSTRUMENTO"),
+                            "plazo": st.column_config.TextColumn("PLAZO"),
+                            "cantidad": st.column_config.TextColumn("CANTIDAD"),
+                            "usd": st.column_config.TextColumn("USD"),
+                            "precio": st.column_config.TextColumn("PRECIO"),
+                            "puntos": st.column_config.TextColumn("PUNTOS"),
+                            "yield_pct": st.column_config.TextColumn("YIELD (%)"),
+                        },
+                    )
         else:
             col_bevsa, col_externas = st.columns(2)
             with col_bevsa:
@@ -1434,11 +1592,13 @@ if pais == "Uruguay":
 
                 if st.button("💾 Guardar en histórico", key="ops_guardar_historico"):
                     guardar_en_historico_ops(hoy_df)
-                    st.success(
-                        f"Guardado en el histórico para hoy ({date.today()}). Para que este guardado "
-                        "sobreviva al próximo redeploy, pedile a Claude que haga commit y push de "
-                        "ops_historicas_uy.csv."
-                    )
+                    ok_sync, mensaje_sync = sincronizar_historico_con_github()
+                    if ok_sync:
+                        st.success(f"Guardado ({date.today()}). {mensaje_sync}")
+                    else:
+                        st.warning(
+                            f"Se guardó localmente, pero no se pudo sincronizar con GitHub: {mensaje_sync}"
+                        )
 
             st.divider()
             st.markdown("#### Histórico")
