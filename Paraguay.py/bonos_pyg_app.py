@@ -793,12 +793,15 @@ with tab_monitor:
             "codigo": st.column_config.TextColumn("CÓDIGO"),
             # yield_bid/offer y px_bid/offer son las columnas EDITABLES (una
             # de las dos parejas segun el modo), asi que se quedan como
-            # numeros de verdad. "localized" le pide al navegador que las
-            # muestre con el formato numerico de su propio idioma.
-            "yield_bid": st.column_config.NumberColumn("YIELD BID %", format="localized"),
-            "yield_offer": st.column_config.NumberColumn("YIELD OFFER %", format="localized"),
-            "px_bid": st.column_config.NumberColumn("PX BID", format="localized"),
-            "px_offer": st.column_config.NumberColumn("PX OFFER", format="localized"),
+            # numeros de verdad. OJO: NO usar format="localized" aca - es
+            # un bug conocido de Streamlit (regresion desde la 1.43): con
+            # "localized" el copy-paste de un bloque de celdas de Excel
+            # se rompe (solo pega la primera celda, o corrompe los
+            # numeros). Con un formato fijo tipo "%.3f" el paste anda bien.
+            "yield_bid": st.column_config.NumberColumn("YIELD BID %", format=f"%.{DEC}f"),
+            "yield_offer": st.column_config.NumberColumn("YIELD OFFER %", format=f"%.{DEC}f"),
+            "px_bid": st.column_config.NumberColumn("PX BID", format=f"%.{DEC}f"),
+            "px_offer": st.column_config.NumberColumn("PX OFFER", format=f"%.{DEC}f"),
             # Estas cuatro son siempre de solo lectura: ya llegan pre-formateadas
             # como texto (fmt_es), asi que van como TextColumn.
             "spread_bid_offer_bps": st.column_config.TextColumn("SPREAD B/O (BPS)"),
@@ -918,9 +921,13 @@ with tab_fras:
         column_config={
             "bono": st.column_config.TextColumn("BONO"),
             "dias_vto": st.column_config.TextColumn("DÍAS AL VTO"),
-            "yield_semianual": st.column_config.NumberColumn("YIELD SEMIANUAL %", format="localized"),
-            "yield_anual": st.column_config.NumberColumn("YIELD ANUAL (TEA) %", format="localized"),
-            "tna": st.column_config.NumberColumn("TNA %", format="localized"),
+            # OJO: NO usar format="localized" en yield_semianual (la unica
+            # columna editable aca) - rompe el copy-paste de un bloque de
+            # celdas de Excel (bug conocido de Streamlit, ver comentario
+            # igual en la tabla de Monitor de bonos).
+            "yield_semianual": st.column_config.NumberColumn("YIELD SEMIANUAL %", format=f"%.{DEC}f"),
+            "yield_anual": st.column_config.NumberColumn("YIELD ANUAL (TEA) %", format=f"%.{DEC}f"),
+            "tna": st.column_config.NumberColumn("TNA %", format=f"%.{DEC}f"),
         },
         key=fras_editor_key,
         on_change=_fras_on_edit,
