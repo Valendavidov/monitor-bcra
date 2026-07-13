@@ -403,41 +403,20 @@ def obtener_sofr():
         return None, None
 
 
-def spread_arrc_pct(dias: float) -> float:
-    """Spread ARRC fijo (para construir el "LIBOR equivalente" a partir
-    del SOFR) segun el plazo en dias. Interpola linealmente entre los
-    tres tenores publicados (1/3/6 meses); si el plazo cae fuera de ese
-    rango, extrapola con la pendiente del segmento mas cercano (no hay
-    spread oficial mas alla de 6 meses, pero es la mejor aproximacion
-    disponible en vez de cortar en seco en el limite)."""
-    tenores = [30, 90, 180]
-    spreads = [0.11448, 0.26161, 0.42826]
-    if dias <= tenores[0]:
-        i = 0
-    elif dias >= tenores[-1]:
-        i = len(tenores) - 2
-    else:
-        i = next(k for k in range(len(tenores) - 1) if tenores[k] <= dias <= tenores[k + 1])
-    d0, d1 = tenores[i], tenores[i + 1]
-    s0, s1 = spreads[i], spreads[i + 1]
-    pendiente = (s1 - s0) / (d1 - d0)
-    return s0 + pendiente * (dias - d0)
-
-
-def ndf_yield_pct(spot: float, px_futuro: float, libor_pct: float, dias: int) -> float:
-    """yield = (365/(spot*dias)) * [px_futuro*(1+libor*dias/365) - spot],
-    con libor en decimal - el resultado ya sale en decimal, por eso se
+def ndf_yield_pct(spot: float, px_futuro: float, sofr_pct: float, dias: int) -> float:
+    """yield = (365/(spot*dias)) * [px_futuro*(1+sofr*dias/365) - spot],
+    con sofr en decimal - el resultado ya sale en decimal, por eso se
     multiplica x100 antes de devolverlo (para mostrarlo como %)."""
-    libor = libor_pct / 100
-    return (365 / (spot * dias)) * (px_futuro * (1 + libor * dias / 365) - spot) * 100
+    sofr = sofr_pct / 100
+    return (365 / (spot * dias)) * (px_futuro * (1 + sofr * dias / 365) - spot) * 100
 
 
-def ndf_px_futuro(spot: float, yield_pct: float, libor_pct: float, dias: int) -> float:
-    """px_futuro = [spot*(1+yield*dias/365)] / (1+libor*dias/365), con
-    yield y libor en decimal."""
-    libor = libor_pct / 100
+def ndf_px_futuro(spot: float, yield_pct: float, sofr_pct: float, dias: int) -> float:
+    """px_futuro = [spot*(1+yield*dias/365)] / (1+sofr*dias/365), con
+    yield y sofr en decimal."""
+    sofr = sofr_pct / 100
     y = yield_pct / 100
-    return (spot * (1 + y * dias / 365)) / (1 + libor * dias / 365)
+    return (spot * (1 + y * dias / 365)) / (1 + sofr * dias / 365)
 
 
 registry = load_registry()
@@ -1069,9 +1048,8 @@ with tab_fras:
 # TAB 5: NDF (Non-Deliverable Forwards)
 # =============================================================================
 # Calcula el yield implicito de un NDF a partir de su precio futuro (o al
-# reves), usando una tasa "LIBOR equivalente" armada con SOFR + el spread
-# fijo ARRC del tenor correspondiente (LIBOR se discontinuo, pero la
-# formula clasica de NDF todavia se arma con esa tasa como referencia).
+# reves), usando el SOFR como tasa de referencia (reemplaza a la LIBOR,
+# discontinuada, en la formula clasica de NDF).
 with tab_ndf:
     st.subheader("NDF — Non-Deliverable Forwards")
 
@@ -1101,31 +1079,26 @@ with tab_ndf:
         spot = st.number_input("Spot", min_value=0.0, value=0.0, step=1.0, format="%.4f", key="ndf_spot")
 
     with col_der:
-        st.markdown("#### Tasa LIBOR-equivalente")
-        sofr_pct, sofr_fecha = obtener_sofr()
+        st.markdown("#### SOFR")
+        sofr_api_pct, sofr_fecha = obtener_sofr()
 
-        modo_libor = st.radio(
-            "Fuente", ["Automático (SOFR + spread ARRC)", "Override manual"], key="ndf_modo_libor",
+        modo_sofr = st.radio(
+            "Fuente", ["Automático (API NY Fed)", "Override manual"], key="ndf_modo_libor",
         )
 
-        if modo_libor == "Override manual" or sofr_pct is None:
-            if sofr_pct is None:
+        if modo_sofr == "Override manual" or sofr_api_pct is None:
+            if sofr_api_pct is None:
                 st.warning(
                     "No se pudo obtener el SOFR desde la API del NY Fed (revisá la conexión). "
                     "Usá el override manual mientras tanto."
                 )
-            libor_pct = st.number_input(
-                "LIBOR-equivalente manual (%)", value=0.0, step=0.01, format=f"%.{DEC}f", key="ndf_libor_manual",
+            sofr_pct = st.number_input(
+                "SOFR manual (%)", value=0.0, step=0.01, format=f"%.{DEC}f", key="ndf_libor_manual",
             )
         else:
-            spread_pct = spread_arrc_pct(dias) if dias > 0 else 0.0
-            libor_pct = sofr_pct + spread_pct
+            sofr_pct = sofr_api_pct
             st.markdown('<div class="yas-label">SOFR (' + str(sofr_fecha) + ')</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{fmt_es(sofr_pct)}%</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-label">SPREAD ARRC ({dias} DÍAS)</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(spread_pct)}%</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">LIBOR-EQUIVALENTE</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(libor_pct)}%</div>', unsafe_allow_html=True)
 
     st.divider()
     st.markdown("#### Cálculo")
@@ -1143,14 +1116,14 @@ with tab_ndf:
                 yield_in = st.number_input(
                     "Yield (%)", value=0.0, step=0.1, format=f"%.{DEC}f", key="ndf_yield_in",
                 )
-            px_out = ndf_px_futuro(spot, yield_in, libor_pct, dias)
+            px_out = ndf_px_futuro(spot, yield_in, sofr_pct, dias)
             yield_out = yield_in
         else:
             with col_in:
                 px_in = st.number_input(
                     "Precio futuro", value=spot, step=0.1, format="%.4f", key="ndf_px_in",
                 )
-            yield_out = ndf_yield_pct(spot, px_in, libor_pct, dias)
+            yield_out = ndf_yield_pct(spot, px_in, sofr_pct, dias)
             px_out = px_in
 
         g1, g2 = st.columns(2)
