@@ -34,6 +34,7 @@ Uso:
 
 import json
 import os
+import re
 import sys
 from datetime import date, timedelta
 
@@ -419,15 +420,169 @@ def ndf_px_futuro(spot: float, yield_pct: float, sofr_pct: float, dias: int) -> 
     return (spot * (1 + y * dias / 365)) / (1 + sofr * dias / 365)
 
 
+# ---------------------------------------------------------------------------
+# Ops Historicas (Uruguay): parseo de los reportes BEVSA / Externas que se
+# pegan a mano en un textarea, para armar una tabla combinada de operaciones
+# del dia con la tasa implicita de cada una.
+# ---------------------------------------------------------------------------
+def _dividir_fila_pegada(linea: str) -> list:
+    """Separa una linea de texto pegado (de una tabla de Excel/web) en sus
+    celdas. Al pegar una tabla en un textarea, el navegador casi siempre
+    preserva las celdas separadas por TAB; si no hay tabs (por ejemplo se
+    pego desde un PDF), se usa 2 o mas espacios seguidos como separador
+    alternativo."""
+    if "\t" in linea:
+        return [c.strip() for c in linea.split("\t")]
+    return [c.strip() for c in re.split(r"\s{2,}", linea.strip())]
+
+
+def _num_es(texto: str):
+    """Convierte un numero en formato español/uruguayo (punto de miles,
+    coma decimal - ej. "20.000.000,00") a float. Es la fuente (BEVSA/
+    Externas) la que viene en ese formato - no tiene relacion con fmt_es(),
+    que es el formato de SALIDA del resto de la app (coma de miles, punto
+    decimal). Devuelve None si la celda viene vacia."""
+    texto = texto.strip().replace("%", "")
+    if not texto:
+        return None
+    return float(texto.replace(".", "").replace(",", "."))
+
+
+def _fecha_es(texto: str) -> date:
+    """Convierte una fecha DD/MM/AAAA (formato de la columna FECHA
+    LIQUIDACIÓN de Externas) a date."""
+    d, m, a = texto.strip().split("/")
+    return date(int(a), int(m), int(d))
+
+
+def mapear_ticker_bevsa(descripcion: str, registry_uy: pd.DataFrame):
+    """Identifica el bono a partir de la descripcion de BEVSA (ej. "BONO
+    GLOBAL $ 10/35 8%"): parsea el mes/año de vencimiento y el cupon, y
+    los cruza contra bonos_universo_uy.csv (coincidencia exacta de mes,
+    año y cupon). Devuelve el "nombre" interno del bono, o None si no
+    encuentra un match (en ese caso la fila se muestra igual, con la
+    descripcion cruda en vez de un ticker - ver parsear_bevsa)."""
+    m = re.search(r"(\d{1,2})/(\d{2})\s+([\d,.]+)\s*%", descripcion)
+    if not m:
+        return None
+    mes, anio_corto, cupon_txt = int(m.group(1)), int(m.group(2)), m.group(3)
+    anio = 2000 + anio_corto
+    cupon = float(cupon_txt.replace(",", "."))
+    match = registry_uy[
+        (registry_uy["maturity"].apply(lambda d: d.month) == mes)
+        & (registry_uy["maturity"].apply(lambda d: d.year) == anio)
+        & ((registry_uy["coupon_pct"] - cupon).abs() < 0.01)
+    ]
+    return match.iloc[0]["nombre"] if not match.empty else None
+
+
+def mapear_ticker_externas(descripcion: str, registry_uy: pd.DataFrame):
+    """Identifica el bono a partir de la descripcion de Externas (ej.
+    "BONO EXTERNO F351029 EUY"). El codigo (351029) codifica el
+    vencimiento como AAMMDD - se arma esa fecha y se cruza contra
+    bonos_universo_uy.csv (coincidencia exacta). Devuelve el "nombre"
+    interno del bono, o None si no matchea contra ninguno de los 11."""
+    m = re.search(r"(\d{6})", descripcion)
+    if not m:
+        return None
+    aa, mm, dd = int(m.group(1)[:2]), int(m.group(1)[2:4]), int(m.group(1)[4:6])
+    try:
+        fecha_candidata = date(2000 + aa, mm, dd)
+    except ValueError:
+        return None
+    match = registry_uy[registry_uy["maturity"] == fecha_candidata]
+    return match.iloc[0]["nombre"] if not match.empty else None
+
+
+def parsear_bevsa(texto: str, registry_uy: pd.DataFrame) -> pd.DataFrame:
+    """Parsea el reporte de BEVSA pegado a mano. Se queda solo con las
+    filas de BONOS (cualquier fila cuyo instrumento no empiece con "BONO"
+    se descarta - eso ya excluye el titulo, el encabezado, las LETRAS R.
+    MONETARIA, las NOTAS DE T. y la fila de TOTAL, todas de un saque).
+    Devuelve nombre_bono/nominales/usd/px/entidad/settlement por fila."""
+    filas = []
+    for linea in texto.splitlines():
+        celdas = _dividir_fila_pegada(linea)
+        if len(celdas) < 10:
+            continue
+        instrumento = celdas[0]
+        if not instrumento.upper().startswith("BONO"):
+            continue
+        ticker = mapear_ticker_bevsa(instrumento, registry_uy)
+        filas.append({
+            "nombre_bono": ticker or instrumento,
+            "nominales": _num_es(celdas[2]),   # CANTIDAD
+            "usd": _num_es(celdas[3]),         # MONTO TRANS. U$S
+            "px": _num_es(celdas[9]),          # PRECIO CIERRE
+            "entidad": "BEVSA",
+            # BEVSA no trae fecha de liquidacion propia: se usa T+1 habil
+            # sobre la fecha en que se pega el reporte (mismo criterio que
+            # el resto de la app).
+            "settlement": SETTLEMENT_DEFAULT,
+        })
+    return pd.DataFrame(filas)
+
+
+def parsear_externas(texto: str, registry_uy: pd.DataFrame) -> pd.DataFrame:
+    """Parsea el reporte de Externas pegado a mano. Se queda con las
+    filas cuya descripcion empieza con "BONO" Y menciona "UY" (ej. el
+    sufijo "EUY") - las que no (ej. "USF") no son bonos uruguayos y se
+    descartan directamente, no se muestran ni sin mapear."""
+    filas = []
+    for linea in texto.splitlines():
+        celdas = _dividir_fila_pegada(linea)
+        if len(celdas) < 6:
+            continue
+        descripcion = celdas[1]
+        if not descripcion.upper().startswith("BONO") or "UY" not in descripcion.upper():
+            continue
+        ticker = mapear_ticker_externas(descripcion, registry_uy)
+        try:
+            settlement = _fecha_es(celdas[5])
+        except (ValueError, IndexError):
+            settlement = SETTLEMENT_DEFAULT
+        filas.append({
+            "nombre_bono": ticker or descripcion,
+            "nominales": _num_es(celdas[2]),  # VALOR NOMINAL
+            "px": _num_es(celdas[3]),         # PRECIO SIN CUPÓN
+            "usd": _num_es(celdas[4]),        # VALOR EFECTIVO
+            "entidad": "Externas",
+            "settlement": settlement,
+        })
+    return pd.DataFrame(filas)
+
+
+def calcular_tasa_operada(nombre_bono: str, px, settlement: date, registry_uy: pd.DataFrame):
+    """Yield to worst de una fila de Ops Historicas. None si el bono no
+    matcheo contra el universo conocido (nombre_bono quedo con la
+    descripcion cruda, no con un "nombre" real del CSV) o si falta precio."""
+    if px is None:
+        return None
+    fila_bono = registry_uy[registry_uy["nombre"] == nombre_bono]
+    if fila_bono.empty:
+        return None
+    bono = make_bond(fila_bono.iloc[0])
+    try:
+        return bono.yield_to_worst(px, settlement)
+    except Exception:
+        return None
+
+
 registry = load_registry()
 
 if registry.empty:
     st.warning("El universo de bonos esta vacio. Anda a la tab 'Monitor de bonos' para cargar uno.")
     st.stop()
 
-tab_cashflow, tab_yas, tab_monitor, tab_fras, tab_ndf = st.tabs(
-    ["Cashflows", "YAS", "Monitor de bonos", "FRAs", "NDF"]
-)
+# "Ops Historicas" solo existe para Uruguay (BEVSA/Externas son fuentes de
+# mercado uruguayo) - por eso la lista de tabs se arma dinamicamente segun
+# el pais elegido en vez de ser siempre la misma.
+_nombres_tabs = ["Cashflows", "YAS", "Monitor de bonos", "FRAs", "NDF"]
+if pais == "Uruguay":
+    _nombres_tabs.append("Ops Históricas")
+_tabs = st.tabs(_nombres_tabs)
+tab_cashflow, tab_yas, tab_monitor, tab_fras, tab_ndf = _tabs[:5]
+tab_ops = _tabs[5] if pais == "Uruguay" else None
 
 
 # =============================================================================
@@ -1142,3 +1297,75 @@ with tab_ndf:
         with g2:
             st.markdown('<div class="yas-label">PRECIO FUTURO</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{fmt_es(px_out, decimales=4)}</div>', unsafe_allow_html=True)
+
+
+# =============================================================================
+# TAB 6: OPS HISTÓRICAS (solo Uruguay)
+# =============================================================================
+# Pegás a mano los reportes de BEVSA (mercado secundario) y de Externas
+# (bonos externos, precio sin cupon) tal como salen de esas fuentes, y la
+# app arma una sola tabla combinada con la tasa implicita de cada operacion
+# (el unico campo que se CALCULA - todo lo demas es dato crudo de la
+# fuente). Se recalcula solo con volver a correr el script, que pasa cada
+# vez que se edita/pega en cualquiera de los dos textareas.
+if pais == "Uruguay":
+    with tab_ops:
+        st.subheader("Ops Históricas")
+
+        seccion = st.radio("Sección", ["Bonos", "NDF"], horizontal=True, key="ops_seccion")
+
+        if seccion == "NDF":
+            st.caption(
+                "Próximamente - misma lógica de pegar texto → parsear → tabla calculada, "
+                "para los NDFs operados."
+            )
+        else:
+            col_bevsa, col_externas = st.columns(2)
+            with col_bevsa:
+                texto_bevsa = st.text_area(
+                    "Pegar reporte BEVSA (mercado secundario)", height=220, key="ops_bevsa_texto",
+                )
+            with col_externas:
+                texto_externas = st.text_area(
+                    "Pegar reporte Externas (precio sin cupón)", height=220, key="ops_externas_texto",
+                )
+
+            df_bevsa = parsear_bevsa(texto_bevsa, registry) if texto_bevsa.strip() else pd.DataFrame()
+            df_externas = parsear_externas(texto_externas, registry) if texto_externas.strip() else pd.DataFrame()
+            combinada = pd.concat([df_bevsa, df_externas], ignore_index=True)
+
+            st.divider()
+            st.markdown("#### Tabla combinada")
+
+            if combinada.empty:
+                st.caption("Pegá el reporte de BEVSA y/o de Externas arriba para ver la tabla combinada.")
+            else:
+                filas_out = []
+                for _, row in combinada.iterrows():
+                    tasa = calcular_tasa_operada(row["nombre_bono"], row["px"], row["settlement"], registry)
+                    filas_out.append({
+                        "entidad": row["entidad"],
+                        "bono": row["nombre_bono"],
+                        "nominales_operados": fmt_es(row["nominales"]) if row["nominales"] is not None else "—",
+                        "tasa_operada_pct": fmt_es(tasa) if tasa is not None else "—",
+                        "usd_operados": fmt_es(row["usd"]) if row["usd"] is not None else "—",
+                        "px_operado": fmt_es(row["px"], decimales=4) if row["px"] is not None else "—",
+                    })
+                tabla_out = (
+                    pd.DataFrame(filas_out)
+                    .sort_values(["bono", "entidad"])
+                    .reset_index(drop=True)
+                )
+                st.dataframe(
+                    tabla_out,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "entidad": st.column_config.TextColumn("ENTIDAD"),
+                        "bono": st.column_config.TextColumn("BONO"),
+                        "nominales_operados": st.column_config.TextColumn("NOMINALES OPERADOS"),
+                        "tasa_operada_pct": st.column_config.TextColumn("TASA OPERADA (%)"),
+                        "usd_operados": st.column_config.TextColumn("USD OPERADOS"),
+                        "px_operado": st.column_config.TextColumn("PX OPERADO"),
+                    },
+                )
