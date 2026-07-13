@@ -112,6 +112,18 @@ def siguiente_dia_habil(d: date) -> date:
 SETTLEMENT_DEFAULT = siguiente_dia_habil(date.today() + timedelta(days=1))
 
 
+def ajustar_settlement(fecha: date) -> date:
+    """Si `fecha` (la que se tipeo en un date_input de settlement) cae
+    sabado o domingo, avisa y devuelve el proximo dia habil en su lugar -
+    reusado por Cashflows/YAS/Monitor de bonos, que repiten el mismo
+    chequeo cada uno con su propia fecha de settlement."""
+    if fecha.weekday() < 5:
+        return fecha
+    habil = siguiente_dia_habil(fecha)
+    st.warning(f"{fecha} es fin de semana. Se usa el próximo día hábil: {habil}.")
+    return habil
+
+
 def fmt_es(x: float, decimales: int = DEC) -> str:
     """Formatea un numero con coma como separador de miles y punto como
     separador decimal (ej. 1,234,567.891) - el formato "de fabrica" de
@@ -182,7 +194,6 @@ if not _password_ok():
 pais = st.radio("País", list(PAISES.keys()), horizontal=True, key="pais_selector")
 cfg = PAISES[pais]
 PRIMARY = cfg["primary"]
-ACCENT = cfg["accent"]
 MONEDA = cfg["moneda"]
 
 
@@ -358,7 +369,6 @@ def make_bond(row: pd.Series) -> Bond:
         calls=CALLS.get(row["nombre"], []),
         amortization=AMORTIZACION.get(row["nombre"], []),
     )
-
 
 
 def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
@@ -702,6 +712,27 @@ DECIMALES_HIST_OPS_BONOS = {
 }
 DECIMALES_HIST_OPS_NDF = {"cantidad": DEC, "usd": DEC, "precio": 4, "puntos": 4, "yield_pct": DEC}
 
+# column_config de cada tabla (sin "fecha" - se agrega solo en el
+# historico, ver mostrar_historico_ops) - se reusan para la tabla de "hoy"
+# y para el historico de cada sub-seccion, en vez de repetirlos.
+COLUMN_CONFIG_OPS_BONOS = {
+    "entidad": st.column_config.TextColumn("ENTIDAD"),
+    "bono": st.column_config.TextColumn("BONO"),
+    "nominales_operados": st.column_config.TextColumn("NOMINALES OPERADOS"),
+    "tasa_operada_pct": st.column_config.TextColumn("TASA OPERADA (%)"),
+    "usd_operados": st.column_config.TextColumn("USD OPERADOS"),
+    "px_operado": st.column_config.TextColumn("PX OPERADO"),
+}
+COLUMN_CONFIG_OPS_NDF = {
+    "instrumento": st.column_config.TextColumn("INSTRUMENTO"),
+    "plazo": st.column_config.TextColumn("PLAZO"),
+    "cantidad": st.column_config.TextColumn("CANTIDAD"),
+    "usd": st.column_config.TextColumn("USD"),
+    "precio": st.column_config.TextColumn("PRECIO"),
+    "puntos": st.column_config.TextColumn("PUNTOS"),
+    "yield_pct": st.column_config.TextColumn("YIELD (%)"),
+}
+
 
 def cargar_historico_ops(ruta: str, columnas: list) -> pd.DataFrame:
     """Lee un historico de Ops Historicas (Uruguay) desde `ruta`. Si
@@ -799,6 +830,48 @@ def formatear_tabla_ops(df: pd.DataFrame, decimales: dict) -> pd.DataFrame:
     return out
 
 
+def mostrar_tabla_ops(df: pd.DataFrame, decimales: dict, column_config: dict) -> None:
+    """Formatea y dibuja una tabla de Ops Historicas (la de "hoy" o el
+    historico completo) - un solo lugar para el use_container_width/
+    hide_index que comparten todas."""
+    st.dataframe(
+        formatear_tabla_ops(df, decimales), use_container_width=True, hide_index=True,
+        column_config=column_config,
+    )
+
+
+def boton_guardar_historico(hoy_df: pd.DataFrame, ruta: str, columnas: list, etiqueta: str, key: str) -> None:
+    """Dibuja el boton "Guardar en histórico": persiste hoy_df (crudo, sin
+    formatear) en `ruta` y sincroniza ese archivo con GitHub al toque.
+    `etiqueta` (ej. "Bonos"/"NDF") identifica el commit; `key` evita que
+    los botones de las dos sub-secciones de Ops Historicas colisionen."""
+    if st.button("💾 Guardar en histórico", key=key):
+        guardar_en_historico_ops(hoy_df, ruta, columnas)
+        ok_sync, mensaje_sync = sincronizar_historico_con_github(ruta, etiqueta)
+        if ok_sync:
+            st.success(f"Guardado ({date.today()}). {mensaje_sync}")
+        else:
+            st.warning(f"Se guardó localmente, pero no se pudo sincronizar con GitHub: {mensaje_sync}")
+
+
+def mostrar_historico_ops(
+    ruta: str, columnas: list, decimales: dict, column_config: dict, orden: list, ascendente: list,
+) -> None:
+    """Dibuja la seccion "#### Histórico": carga lo persistido en `ruta`,
+    lo ordena por `orden` (con `ascendente` paralelo, uno por columna) y
+    lo muestra formateado. `column_config` es el de la tabla de "hoy" (sin
+    "fecha" - se la agrega aca, ya que solo el historico tiene esa
+    columna)."""
+    st.divider()
+    st.markdown("#### Histórico")
+    historico = cargar_historico_ops(ruta, columnas)
+    if historico.empty:
+        st.caption("Todavía no guardaste ningún día en el histórico (usá el botón de arriba).")
+        return
+    mostrado = historico.sort_values(orden, ascending=ascendente).reset_index(drop=True)
+    mostrar_tabla_ops(mostrado, decimales, {"fecha": st.column_config.DateColumn("FECHA"), **column_config})
+
+
 registry = load_registry()
 
 if registry.empty:
@@ -829,11 +902,7 @@ with tab_cashflow:
     with col_sel:
         nombre_cf = st.selectbox("Bono", registry_cf["nombre"].tolist(), key="cf_bono")
     with col_settle:
-        settlement_cf = st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="cf_settlement")
-    if settlement_cf.weekday() >= 5:
-        settlement_cf_habil = siguiente_dia_habil(settlement_cf)
-        st.warning(f"{settlement_cf} es fin de semana. Se usa el próximo día hábil: {settlement_cf_habil}.")
-        settlement_cf = settlement_cf_habil
+        settlement_cf = ajustar_settlement(st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="cf_settlement"))
 
     row_cf = registry_cf[registry_cf["nombre"] == nombre_cf].iloc[0]
     bond_cf = make_bond(row_cf)
@@ -884,11 +953,7 @@ with tab_yas:
         isin_txt = row_sel.get("isin") or "-"
         st.caption(f"ISIN: {isin_txt}  |  Cupón: {row_sel['coupon_pct']}%  |  Vto: {row_sel['maturity']}")
 
-        settlement = st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="yas_settlement")
-        if settlement.weekday() >= 5:
-            settlement_habil = siguiente_dia_habil(settlement)
-            st.warning(f"{settlement} es fin de semana. Se usa el próximo día hábil: {settlement_habil}.")
-            settlement = settlement_habil
+        settlement = ajustar_settlement(st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="yas_settlement"))
         # "Yield" va primero en la lista (y por lo tanto es la opcion por
         # defecto) porque estos bonos se operan/cotizan en tasa, no en precio.
         modo = st.radio("Ingresar por", ["Yield to Worst %", "Precio limpio"], key="yas_modo")
@@ -1051,11 +1116,9 @@ with tab_monitor:
         # "Yield" primero: estos bonos se pricean en tasa por convencion de mercado.
         modo_mesa = st.radio("Ingresar por", ["Yield", "Precio"], horizontal=True, key="mesa_modo")
     with col_settle:
-        mesa_settlement = st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
-    if mesa_settlement.weekday() >= 5:
-        mesa_settlement_habil = siguiente_dia_habil(mesa_settlement)
-        st.warning(f"{mesa_settlement} es fin de semana. Se usa el próximo día hábil: {mesa_settlement_habil}.")
-        mesa_settlement = mesa_settlement_habil
+        mesa_settlement = ajustar_settlement(
+            st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
+        )
 
     # Semilla (solo la primera vez que aparece un bono nuevo en la sesion):
     # arrancamos con yield bid 6.50% / offer 6.30%, y calculamos el PRECIO
@@ -1577,55 +1640,15 @@ if pais == "Uruguay":
                             "yield_pct": yld,
                         })
                     hoy_ndf_df = pd.DataFrame(filas_crudas)
-                    st.dataframe(
-                        formatear_tabla_ops(hoy_ndf_df, DECIMALES_HIST_OPS_NDF),
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "instrumento": st.column_config.TextColumn("INSTRUMENTO"),
-                            "plazo": st.column_config.TextColumn("PLAZO"),
-                            "cantidad": st.column_config.TextColumn("CANTIDAD"),
-                            "usd": st.column_config.TextColumn("USD"),
-                            "precio": st.column_config.TextColumn("PRECIO"),
-                            "puntos": st.column_config.TextColumn("PUNTOS"),
-                            "yield_pct": st.column_config.TextColumn("YIELD (%)"),
-                        },
+                    mostrar_tabla_ops(hoy_ndf_df, DECIMALES_HIST_OPS_NDF, COLUMN_CONFIG_OPS_NDF)
+                    boton_guardar_historico(
+                        hoy_ndf_df, OPS_HIST_NDF_PATH, COLUMNAS_HIST_OPS_NDF, "NDF", "ops_ndf_guardar_historico",
                     )
 
-                    if st.button("💾 Guardar en histórico", key="ops_ndf_guardar_historico"):
-                        guardar_en_historico_ops(hoy_ndf_df, OPS_HIST_NDF_PATH, COLUMNAS_HIST_OPS_NDF)
-                        ok_sync, mensaje_sync = sincronizar_historico_con_github(OPS_HIST_NDF_PATH, "NDF")
-                        if ok_sync:
-                            st.success(f"Guardado ({date.today()}). {mensaje_sync}")
-                        else:
-                            st.warning(
-                                f"Se guardó localmente, pero no se pudo sincronizar con GitHub: {mensaje_sync}"
-                            )
-
-            st.divider()
-            st.markdown("#### Histórico")
-            historico_ndf_df = cargar_historico_ops(OPS_HIST_NDF_PATH, COLUMNAS_HIST_OPS_NDF)
-            if historico_ndf_df.empty:
-                st.caption("Todavía no guardaste ningún día en el histórico (usá el botón de arriba).")
-            else:
-                historico_ndf_mostrado = historico_ndf_df.sort_values(
-                    ["fecha", "instrumento"], ascending=[False, True]
-                ).reset_index(drop=True)
-                st.dataframe(
-                    formatear_tabla_ops(historico_ndf_mostrado, DECIMALES_HIST_OPS_NDF),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "fecha": st.column_config.DateColumn("FECHA"),
-                        "instrumento": st.column_config.TextColumn("INSTRUMENTO"),
-                        "plazo": st.column_config.TextColumn("PLAZO"),
-                        "cantidad": st.column_config.TextColumn("CANTIDAD"),
-                        "usd": st.column_config.TextColumn("USD"),
-                        "precio": st.column_config.TextColumn("PRECIO"),
-                        "puntos": st.column_config.TextColumn("PUNTOS"),
-                        "yield_pct": st.column_config.TextColumn("YIELD (%)"),
-                    },
-                )
+            mostrar_historico_ops(
+                OPS_HIST_NDF_PATH, COLUMNAS_HIST_OPS_NDF, DECIMALES_HIST_OPS_NDF, COLUMN_CONFIG_OPS_NDF,
+                orden=["fecha", "instrumento"], ascendente=[False, True],
+            )
         else:
             col_bevsa, col_externas = st.columns(2)
             with col_bevsa:
@@ -1670,50 +1693,12 @@ if pais == "Uruguay":
                     .sort_values(["bono", "entidad"])
                     .reset_index(drop=True)
                 )
-                st.dataframe(
-                    formatear_tabla_ops(hoy_df, DECIMALES_HIST_OPS_BONOS),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "entidad": st.column_config.TextColumn("ENTIDAD"),
-                        "bono": st.column_config.TextColumn("BONO"),
-                        "nominales_operados": st.column_config.TextColumn("NOMINALES OPERADOS"),
-                        "tasa_operada_pct": st.column_config.TextColumn("TASA OPERADA (%)"),
-                        "usd_operados": st.column_config.TextColumn("USD OPERADOS"),
-                        "px_operado": st.column_config.TextColumn("PX OPERADO"),
-                    },
+                mostrar_tabla_ops(hoy_df, DECIMALES_HIST_OPS_BONOS, COLUMN_CONFIG_OPS_BONOS)
+                boton_guardar_historico(
+                    hoy_df, OPS_HIST_PATH, COLUMNAS_HIST_OPS_BONOS, "Bonos", "ops_guardar_historico",
                 )
 
-                if st.button("💾 Guardar en histórico", key="ops_guardar_historico"):
-                    guardar_en_historico_ops(hoy_df, OPS_HIST_PATH, COLUMNAS_HIST_OPS_BONOS)
-                    ok_sync, mensaje_sync = sincronizar_historico_con_github(OPS_HIST_PATH, "Bonos")
-                    if ok_sync:
-                        st.success(f"Guardado ({date.today()}). {mensaje_sync}")
-                    else:
-                        st.warning(
-                            f"Se guardó localmente, pero no se pudo sincronizar con GitHub: {mensaje_sync}"
-                        )
-
-            st.divider()
-            st.markdown("#### Histórico")
-            historico_df = cargar_historico_ops(OPS_HIST_PATH, COLUMNAS_HIST_OPS_BONOS)
-            if historico_df.empty:
-                st.caption("Todavía no guardaste ningún día en el histórico (usá el botón de arriba).")
-            else:
-                historico_mostrado = historico_df.sort_values(
-                    ["fecha", "bono", "entidad"], ascending=[False, True, True]
-                ).reset_index(drop=True)
-                st.dataframe(
-                    formatear_tabla_ops(historico_mostrado, DECIMALES_HIST_OPS_BONOS),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "fecha": st.column_config.DateColumn("FECHA"),
-                        "entidad": st.column_config.TextColumn("ENTIDAD"),
-                        "bono": st.column_config.TextColumn("BONO"),
-                        "nominales_operados": st.column_config.TextColumn("NOMINALES OPERADOS"),
-                        "tasa_operada_pct": st.column_config.TextColumn("TASA OPERADA (%)"),
-                        "usd_operados": st.column_config.TextColumn("USD OPERADOS"),
-                        "px_operado": st.column_config.TextColumn("PX OPERADO"),
-                    },
-                )
+            mostrar_historico_ops(
+                OPS_HIST_PATH, COLUMNAS_HIST_OPS_BONOS, DECIMALES_HIST_OPS_BONOS, COLUMN_CONFIG_OPS_BONOS,
+                orden=["fecha", "bono", "entidad"], ascendente=[False, True, True],
+            )
