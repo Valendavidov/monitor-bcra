@@ -93,7 +93,7 @@ def fmt_es(x: float, decimales: int = DEC) -> str:
 
 
 # =============================================================================
-# CONVERSIÓN ENTRE CONVENCIONES DE TASA (Semi Anual / TNA Semianual / TEA)
+# CONVERSIÓN ENTRE CONVENCIONES DE TASA (TEA / TNA Semianual)
 # =============================================================================
 # El motor de cálculo (bond_model_ar.py) siempre trabaja con un yield que es,
 # por construcción, la TEA (tasa efectiva anual): dirty_price() la resuelve
@@ -101,25 +101,15 @@ def fmt_es(x: float, decimales: int = DEC) -> str:
 # docstring de bond_model_ar.py). A partir de esa TEA:
 #   - TNA SEMIANUAL = ((1+TEA)^(180/360) - 1) * (360/180)  (nominal anual,
 #     base semestral - la tasa que, compuesta 2 veces al año, da la TEA)
-#   - SEMI ANUAL    = TNA Semianual / 2                     (la tasa propia
-#     del período de 6 meses)
-# Ninguna de las tres depende del plazo/vencimiento del bono. Se usan en
+# Ninguna de las dos depende del plazo/vencimiento del bono. Se usan en
 # YAS, Monitor de bonos y FRAs para que la usuaria pueda pricear
-# indistintamente en cualquiera de las tres convenciones.
+# indistintamente en cualquiera de las dos convenciones.
 def tna_a_tea(tna_pct: float) -> float:
     return ((1 + tna_pct / 100 / 2) ** 2 - 1) * 100
 
 
 def tea_a_tna(tea_pct: float) -> float:
     return (((1 + tea_pct / 100) ** 0.5) - 1) * 2 * 100
-
-
-def tna_a_semi(tna_pct: float) -> float:
-    return tna_pct / 2
-
-
-def semi_a_tna(semi_pct: float) -> float:
-    return semi_pct * 2
 
 
 st.set_page_config(page_title="Monitor de Bonos Argentina (USD)", layout="wide")
@@ -560,30 +550,19 @@ with tab_yas:
             summary = bond.summary(settlement, clean_price=clean_price_calc, put_date=put_date, put_price_pct=put_precio)
         else:
             # La tasa se puede tipear en TEA (la convención nativa del motor
-            # de cálculo, resuelta como XIRR), TNA Semianual o Semi Anual -
-            # se convierte a TEA antes de pricear, y se vuelve a convertir
-            # para mostrar el valor guardado la próxima vez que se abre
-            # este bono.
+            # de cálculo, resuelta como XIRR) o TNA Semianual - se convierte
+            # a TEA antes de pricear, y se vuelve a convertir para mostrar
+            # el valor guardado la próxima vez que se abre este bono.
             convencion = st.radio(
-                "Convención", ["TEA", "TNA Semianual", "Semi Anual"], horizontal=True, key="yas_convencion",
+                "Convención", ["TEA", "TNA Semianual"], horizontal=True, key="yas_convencion",
             )
             tea_guardada = cargar_ultimo_yield(nombre_sel)
-            if convencion == "TNA Semianual":
-                valor_default = tea_a_tna(tea_guardada)
-            elif convencion == "Semi Anual":
-                valor_default = tna_a_semi(tea_a_tna(tea_guardada))
-            else:
-                valor_default = tea_guardada
+            valor_default = tea_a_tna(tea_guardada) if convencion == "TNA Semianual" else tea_guardada
             tea_in_raw = st.number_input(
                 f"Yield {convencion} %", value=valor_default, step=0.1, format=f"%.{DEC}f",
                 key=f"yas_tea_{nombre_sel}_{convencion}",
             )
-            if convencion == "TNA Semianual":
-                tea_in = tna_a_tea(tea_in_raw)
-            elif convencion == "Semi Anual":
-                tea_in = tna_a_tea(semi_a_tna(tea_in_raw))
-            else:
-                tea_in = tea_in_raw
+            tea_in = tna_a_tea(tea_in_raw) if convencion == "TNA Semianual" else tea_in_raw
             guardar_ultimo_yield(nombre_sel, tea_in)
             summary = bond.summary(settlement, tea_pct=tea_in, put_date=put_date, put_price_pct=put_precio)
 
@@ -597,8 +576,6 @@ with tab_yas:
             st.markdown(f'<div class="yas-value">{fmt_es(summary["tea_pct"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">YIELD TNA SEMIANUAL %</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{fmt_es(tea_a_tna(summary["tea_pct"]))}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">YIELD SEMI ANUAL %</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(tna_a_semi(tea_a_tna(summary["tea_pct"])))}</div>', unsafe_allow_html=True)
             precio_clean_mercado = clean_original_a_mercado(bond, summary["precio_clean"], settlement)
             st.markdown('<div class="yas-label">PRECIO CLEAN</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{fmt_es(precio_clean_mercado)}</div>', unsafe_allow_html=True)
@@ -656,7 +633,7 @@ with tab_monitor:
         convencion_mesa = "TEA"
         if modo_mesa == "Yield":
             convencion_mesa = st.radio(
-                "Convención", ["TEA", "TNA Semianual", "Semi Anual"], horizontal=True, key="mesa_convencion",
+                "Convención", ["TEA", "TNA Semianual"], horizontal=True, key="mesa_convencion",
             )
     with col_settle:
         mesa_settlement = ajustar_settlement(
@@ -669,8 +646,8 @@ with tab_monitor:
             b_seed = make_bond(bono_seed)
             # Todo se guarda internamente siempre en (TEA, precio Clean) sin
             # importar la categoría - la convención de entrada/visualización
-            # (Dirty/Clean, TEA/TNA/Semi) es solo una capa de conversión al
-            # mostrar/editar la tabla (ver mas abajo).
+            # (Dirty/Clean, TEA/TNA Semianual) es solo una capa de conversión
+            # al mostrar/editar la tabla (ver mas abajo).
             st.session_state[yld_bid_key][n] = 10.00
             st.session_state[yld_offer_key][n] = 9.50
             st.session_state[px_bid_key][n] = b_seed.clean_price(10.00, mesa_settlement)
@@ -711,8 +688,6 @@ with tab_monitor:
         def _a_convencion(yield_tea):
             if convencion_mesa == "TNA Semianual":
                 return tea_a_tna(yield_tea)
-            if convencion_mesa == "Semi Anual":
-                return tna_a_semi(tea_a_tna(yield_tea))
             return yield_tea
 
         yield_bid_mostrado = _a_convencion(yield_bid_tea)
@@ -781,8 +756,6 @@ with tab_monitor:
                 def _a_tea(valor_in):
                     if convencion_mesa == "TNA Semianual":
                         return tna_a_tea(valor_in)
-                    if convencion_mesa == "Semi Anual":
-                        return tna_a_tea(semi_a_tna(valor_in))
                     return valor_in
 
                 if "yield_bid" in cambios:
@@ -856,7 +829,6 @@ with tab_fras:
             "dias_vto": fmt_es(dias, decimales=0),
             "tea": round(yld_tea, DEC),
             "tna_semianual": round(tea_a_tna(yld_tea), DEC),
-            "yield_semianual": round(tna_a_semi(tea_a_tna(yld_tea)), DEC),
         })
     input_df = pd.DataFrame(input_rows)
 
@@ -874,13 +846,12 @@ with tab_fras:
         input_df,
         use_container_width=True,
         hide_index=True,
-        disabled=["bono", "dias_vto", "tna_semianual", "yield_semianual"],
+        disabled=["bono", "dias_vto", "tna_semianual"],
         column_config={
             "bono": st.column_config.TextColumn("BONO"),
             "dias_vto": st.column_config.TextColumn("DÍAS AL VTO"),
             "tea": st.column_config.NumberColumn("TEA %", format=f"%.{DEC}f"),
             "tna_semianual": st.column_config.NumberColumn("TNA SEMIANUAL %", format=f"%.{DEC}f"),
-            "yield_semianual": st.column_config.NumberColumn("YIELD SEMIANUAL %", format=f"%.{DEC}f"),
         },
         key=fras_editor_key,
         on_change=_fras_on_edit,
@@ -893,12 +864,11 @@ with tab_fras:
 
     yield_tea = {n: st.session_state[fras_yield_key][n] for n in nombres}
     yield_tna = {n: tea_a_tna(yield_tea[n]) for n in nombres}
-    yield_semi = {n: tna_a_semi(yield_tna[n]) for n in nombres}
 
     etiquetas = [codigos[n] for n in nombres]
     t_por_nodo = anios_al_vto
 
-    TASAS_BASE = {"TEA": yield_tea, "TNA Semianual": yield_tna, "Semi Anual": yield_semi}
+    TASAS_BASE = {"TEA": yield_tea, "TNA Semianual": yield_tna}
 
     def forward_compounding(ti, ri, tj, rj):
         return ((1 + rj) ** tj / (1 + ri) ** ti) ** (1 / (tj - ti)) - 1
@@ -957,6 +927,6 @@ with tab_fras:
 
         st.markdown("#### Simple Rate")
         base_b = st.radio(
-            "Tasa de base", list(TASAS_BASE.keys()), horizontal=True, index=2, key=f"fras_base_b_{fra_key_suffix}",
+            "Tasa de base", list(TASAS_BASE.keys()), horizontal=True, index=1, key=f"fras_base_b_{fra_key_suffix}",
         )
         _mostrar_matriz(*armar_matriz(TASAS_BASE[base_b], forward_simple))
