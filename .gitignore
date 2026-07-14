@@ -2,4 +2,5 @@ __pycache__/
 *.pyc
 .venv/
 Paraguay.py/yas_ultimos_yields.json
+Argentina.py/yas_ultimos_yields_ar.json
 .streamlit/secrets.toml
