@@ -233,25 +233,41 @@ def load_amortizacion() -> dict:
 
 
 def load_puts() -> dict:
-    """Lee bonos_puts_ar.csv y arma {nombre: (fecha_desde, precio_pct_default)}.
-    Bonos que no aparecen (la mayoria - solo algunas clases de BOPREAL
-    tienen put) no tienen opción de redención anticipada."""
+    """Lee bonos_puts_ar.csv y arma {nombre: [(tipo, fecha_desde, fecha_hasta), ...]}.
+    `tipo` es "bcra" o "afip"; `fecha_hasta` es None cuando la ventana no
+    tiene límite (dura hasta el vencimiento). Bonos que no aparecen (la
+    mayoria - solo algunas clases de BOPREAL tienen put) no tienen
+    opción de redención anticipada. Un mismo bono puede tener mas de una
+    ventana (ej. BPOC7/BPOA8 tienen AFIP Y BCRA simultaneamente
+    habilitados en el mismo tramo; BPOB7 tiene AFIP primero y BCRA
+    despues, sin superposición) - ver selector_escenario()."""
     if not os.path.exists(PUTS_PATH):
         return {}
     df = pd.read_csv(PUTS_PATH)
     df["fecha_desde"] = pd.to_datetime(df["fecha_desde"]).dt.date
-    return {row["nombre"]: (row["fecha_desde"], float(row["precio_pct"])) for _, row in df.iterrows()}
+    df["fecha_hasta"] = pd.to_datetime(df["fecha_hasta"]).dt.date
+    ventanas: dict = {}
+    for _, row in df.iterrows():
+        hasta = None if pd.isna(row["fecha_hasta"]) else row["fecha_hasta"]
+        ventanas.setdefault(row["nombre"], []).append((row["tipo"], row["fecha_desde"], hasta))
+    return ventanas
 
 
 CUPONES = load_cupones()
 AMORTIZACION = load_amortizacion()
-PUTS = load_puts()
+PUTS_VENTANAS = load_puts()
 
 
 def make_bond(row: pd.Series) -> Bond:
     coupon_anchor = row.get("coupon_anchor")
     if pd.isna(coupon_anchor):
         coupon_anchor = None
+    ventanas = PUTS_VENTANAS.get(row["nombre"], [])
+    # Bond.puts es solo un flag generico ("este bono tiene ALGUN put") mas
+    # la fecha mas temprana entre todas sus ventanas - el detalle de que
+    # TIPO (BCRA/AFIP) corresponde a cada fecha vive en PUTS_VENTANAS,
+    # que usa selector_escenario() directamente (ver docstring de load_puts).
+    puts_generico = [(min(v[1] for v in ventanas), 100.0)] if ventanas else []
     return Bond(
         coupon_schedule=CUPONES.get(row["nombre"], [(row["maturity"], 0.0)]),
         maturity=row["maturity"],
@@ -259,7 +275,7 @@ def make_bond(row: pd.Series) -> Bond:
         freq=int(row["freq"]),
         coupon_anchor=coupon_anchor,
         amortization=AMORTIZACION.get(row["nombre"], []),
-        puts=[PUTS[row["nombre"]]] if row["nombre"] in PUTS else [],
+        puts=puts_generico,
     )
 
 
@@ -405,7 +421,19 @@ def obtener_valor_afip_bopreal():
         return None, None
 
 
-def selector_escenario(bond: Bond, key_prefix: str, settlement: date):
+def _tipos_validos_en_fecha(nombre_bono: str, fecha: date) -> list:
+    """Para un bono y una fecha de ejercicio, devuelve qué tipos de put
+    ("bcra", "afip") están habilitados ESE día según bonos_puts_ar.csv.
+    BPOB7 tiene ventanas consecutivas sin superposición (AFIP hasta
+    cierta fecha, BCRA de ahí en adelante) - acá se resuelve solo, sin
+    que la usuaria tenga que elegir a mano. BPOC7/BPOA8 tienen AFIP y
+    BCRA habilitados en simultáneo en el mismo tramo - ahí sigue
+    haciendo falta elegir cuál usar."""
+    ventanas = PUTS_VENTANAS.get(nombre_bono, [])
+    return [tipo for (tipo, desde, hasta) in ventanas if desde <= fecha and (hasta is None or fecha <= hasta)]
+
+
+def selector_escenario(bond: Bond, key_prefix: str, settlement: date, nombre_bono: str):
     """Si el bono tiene puts cargados (BOPREAL con opción de recompra
     anticipada), dibuja el selector manual "Vencimiento normal" / "Put
     anticipado" - a diferencia de Paraguay/Uruguay, ACA la usuaria elige a
@@ -417,7 +445,12 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date):
     (fecha de ejecución = fecha de valuación) - pedido explícito. Esa
     fecha es editable para simular un ejercicio más adelante; nunca puede
     ser ANTERIOR al settlement (el motor de cálculo asume que se cobra un
-    flujo futuro-o-presente, no pasado)."""
+    flujo futuro-o-presente, no pasado).
+
+    Las opciones de precio de put (Manual/BCRA/AFIP) se filtran según cuál
+    tipo esté habilitado para la fecha de ejecución elegida - ver
+    _tipos_validos_en_fecha(). Si un bono solo tiene un tipo posible en esa
+    fecha, se pricea directamente por ese (no hace falta elegir)."""
     if not bond.puts:
         return None, None
 
@@ -428,7 +461,13 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date):
     if modo == "Vencimiento normal":
         return None, None
 
-    st.caption(f"Ejercicio del put habilitado desde el {fecha_desde_default}.")
+    ventanas = PUTS_VENTANAS.get(nombre_bono, [])
+    descripciones = []
+    for tipo, desde, hasta in sorted(ventanas, key=lambda v: v[1]):
+        rango = f"{desde} a {hasta}" if hasta else f"desde {desde} (sin límite)"
+        descripciones.append(f"{tipo.upper()}: {rango}")
+    st.caption("Ejercicio del put habilitado — " + " | ".join(descripciones))
+
     col_f, _ = st.columns(2)
     with col_f:
         put_date = st.date_input(
@@ -438,9 +477,30 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date):
     if put_date < fecha_desde_default:
         st.warning(f"El put recién se puede ejercer desde el {fecha_desde_default}. Igual se calcula con la fecha elegida.")
 
+    tipos_validos = _tipos_validos_en_fecha(nombre_bono, put_date)
+    opciones = ["Manual (% del capital vigente)"]
+    if "bcra" in tipos_validos:
+        opciones.append("BCRA (Valor Técnico × A3500)")
+    if "afip" in tipos_validos:
+        opciones.append("AFIP/ARCA (valor publicado)")
+    if not tipos_validos:
+        st.caption("Ningún put (BCRA/AFIP) está habilitado para esta fecha según el cronograma cargado — usá Manual.")
+    elif len(opciones) == 2:
+        st.caption(f"Para esta fecha, el único put habilitado es {opciones[1].split(' ')[0]}.")
+
+    # Default: si hay más de un tipo habilitado (ej. BPOC7/BPOA8 en su
+    # tramo con AFIP y BCRA simultáneos), preferir BCRA - es la fuente
+    # con conversión a USD sin ambigüedad (ver caption de AFIP más abajo).
+    if "bcra" in tipos_validos:
+        default_tipo = "BCRA (Valor Técnico × A3500)"
+    elif "afip" in tipos_validos:
+        default_tipo = "AFIP/ARCA (valor publicado)"
+    else:
+        default_tipo = "Manual (% del capital vigente)"
+
     tipo_put = st.radio(
-        "Precio del put", ["Manual (% del capital vigente)", "BCRA (Valor Técnico × A3500)", "AFIP/ARCA (valor publicado)"],
-        key=f"{key_prefix}_put_tipo",
+        "Precio del put", opciones, index=opciones.index(default_tipo),
+        key=f"{key_prefix}_put_tipo_{'_'.join(tipos_validos) or 'ninguno'}",
     )
 
     if tipo_put == "Manual (% del capital vigente)":
@@ -518,7 +578,7 @@ with tab_cashflow:
     row_cf = registry_cf[registry_cf["nombre"] == nombre_cf].iloc[0]
     bond_cf = make_bond(row_cf)
 
-    put_date_cf, put_precio_cf = selector_escenario(bond_cf, "cf", settlement_cf)
+    put_date_cf, put_precio_cf = selector_escenario(bond_cf, "cf", settlement_cf, nombre_cf)
 
     prev_coupon, next_coupon, _, period_days, accrued_days, _ = bond_cf.schedule(settlement_cf)
     accrued = bond_cf.accrued_interest(settlement_cf)
@@ -564,7 +624,7 @@ with tab_yas:
 
         settlement = ajustar_settlement(st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="yas_settlement"))
 
-        put_date, put_precio = selector_escenario(bond, "yas", settlement)
+        put_date, put_precio = selector_escenario(bond, "yas", settlement, nombre_sel)
 
         modo = st.radio(
             "Ingresar por", ["Yield %", "Precio Clean", "Precio Dirty"], key="yas_modo",
