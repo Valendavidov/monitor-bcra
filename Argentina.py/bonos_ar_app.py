@@ -316,6 +316,17 @@ def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
     return df
 
 
+def filtrar_por_categorias_multi(df: pd.DataFrame, key: str) -> pd.DataFrame:
+    """Como filtrar_por_categoria, pero con multiselect en vez de radio -
+    para poder combinar categorías (ej. Bonar + Global, dejando afuera
+    BOPREAL) en vez de elegir solo una a la vez o todas juntas."""
+    categorias = sorted(df["categoria"].unique().tolist())
+    elegidas = st.multiselect("Categoría", categorias, default=categorias, key=key)
+    if not elegidas:
+        return df
+    return df[df["categoria"].isin(elegidas)]
+
+
 def cargar_ultimo_yield(nombre_bono: str, default: float = 10.0) -> float:
     if not os.path.exists(LAST_YIELDS_PATH):
         return default
@@ -638,7 +649,7 @@ with tab_monitor:
         "BOPREAL) — para pricear un escenario de put puntual usá la tab YAS."
     )
 
-    monitor_universe = filtrar_por_categoria(registry, key="cat_monitor")
+    monitor_universe = filtrar_por_categorias_multi(registry, key="cat_monitor")
 
     clean_key = "mesa_clean_original_ar"
     st.session_state.setdefault(clean_key, {})
