@@ -31,10 +31,12 @@ Uso:
 
 import json
 import os
+import re
 import sys
 from datetime import date, timedelta
 
 import pandas as pd
+import requests
 import streamlit as st
 
 # Ver el mismo comentario en Paraguay.py/bonos_pyg_app.py: Streamlit Cloud
@@ -88,6 +90,36 @@ def fmt_es(x: float, decimales: int = DEC) -> str:
     """Coma de miles, punto decimal - ver el mismo comentario en
     Paraguay.py/bonos_pyg_app.py."""
     return f"{x:,.{decimales}f}"
+
+
+# =============================================================================
+# CONVERSIÓN ENTRE CONVENCIONES DE TASA (Semi Anual / TNA Semianual / TEA)
+# =============================================================================
+# El motor de cálculo (bond_model_ar.py) siempre trabaja con un yield que es,
+# por construcción, la TEA (tasa efectiva anual): dirty_price() la resuelve
+# como un XIRR clásico (Actual/365, capitalización anual efectiva - ver
+# docstring de bond_model_ar.py). A partir de esa TEA:
+#   - TNA SEMIANUAL = ((1+TEA)^(180/360) - 1) * (360/180)  (nominal anual,
+#     base semestral - la tasa que, compuesta 2 veces al año, da la TEA)
+#   - SEMI ANUAL    = TNA Semianual / 2                     (la tasa propia
+#     del período de 6 meses)
+# Ninguna de las tres depende del plazo/vencimiento del bono. Se usan en
+# YAS, Monitor de bonos y FRAs para que la usuaria pueda pricear
+# indistintamente en cualquiera de las tres convenciones.
+def tna_a_tea(tna_pct: float) -> float:
+    return ((1 + tna_pct / 100 / 2) ** 2 - 1) * 100
+
+
+def tea_a_tna(tea_pct: float) -> float:
+    return (((1 + tea_pct / 100) ** 0.5) - 1) * 2 * 100
+
+
+def tna_a_semi(tna_pct: float) -> float:
+    return tna_pct / 2
+
+
+def semi_a_tna(semi_pct: float) -> float:
+    return semi_pct * 2
 
 
 st.set_page_config(page_title="Monitor de Bonos Argentina (USD)", layout="wide")
@@ -177,6 +209,9 @@ def load_registry() -> pd.DataFrame:
     df = pd.read_csv(REGISTRY_PATH)
     df["maturity"] = pd.to_datetime(df["maturity"]).dt.date
     df["isin"] = df["isin"].fillna("")
+    # coupon_anchor: solo AL29/GD29/AE38/GD38 lo tienen cargado (ver
+    # docstring de Bond.coupon_anchor) - el resto queda en None/NaT.
+    df["coupon_anchor"] = pd.to_datetime(df["coupon_anchor"]).dt.date
     return df
 
 
@@ -222,14 +257,38 @@ PUTS = load_puts()
 
 
 def make_bond(row: pd.Series) -> Bond:
+    coupon_anchor = row.get("coupon_anchor")
+    if pd.isna(coupon_anchor):
+        coupon_anchor = None
     return Bond(
         coupon_schedule=CUPONES.get(row["nombre"], [(row["maturity"], 0.0)]),
         maturity=row["maturity"],
         face=float(row["face"]),
         freq=int(row["freq"]),
+        coupon_anchor=coupon_anchor,
         amortization=AMORTIZACION.get(row["nombre"], []),
         puts=[PUTS[row["nombre"]]] if row["nombre"] in PUTS else [],
     )
+
+
+# =============================================================================
+# PRECIO CLEAN: "de mercado" (por 100 de capital vigente) vs "original"
+# (por 100 del face original - la unidad nativa de clean_price/dirty_price)
+# =============================================================================
+# Verificado contra una tabla de referencia real: el precio DIRTY se cotiza
+# por 100 de face ORIGINAL (exactamente lo que devuelve dirty_price(), sin
+# reescalar), pero el precio CLEAN se cotiza reescalado sobre el capital
+# VIGENTE - dos convenciones distintas para el mismo bono. Para un bono que
+# todavia no amortizo nada (capital vigente = 100% del original) da exacto
+# lo mismo; la diferencia solo importa para bonos ya parcialmente
+# amortizados (Bonares/Globales del canje 2020 con vencimiento cercano,
+# BOPREAL Serie 1).
+def clean_original_a_mercado(b: Bond, clean_original: float, settlement: date) -> float:
+    return clean_original / b.outstanding_pct(settlement) * 100
+
+
+def clean_mercado_a_original(b: Bond, clean_mercado: float, settlement: date) -> float:
+    return clean_mercado * b.outstanding_pct(settlement) / 100
 
 
 def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
@@ -251,7 +310,7 @@ def cargar_ultimo_yield(nombre_bono: str, default: float = 10.0) -> float:
         return default
 
 
-def guardar_ultimo_yield(nombre_bono: str, ytm_pct: float) -> None:
+def guardar_ultimo_yield(nombre_bono: str, tea_pct: float) -> None:
     data = {}
     if os.path.exists(LAST_YIELDS_PATH):
         try:
@@ -259,9 +318,63 @@ def guardar_ultimo_yield(nombre_bono: str, ytm_pct: float) -> None:
                 data = json.load(f)
         except json.JSONDecodeError:
             data = {}
-    data[nombre_bono] = ytm_pct
+    data[nombre_bono] = tea_pct
     with open(LAST_YIELDS_PATH, "w") as f:
         json.dump(data, f, indent=2)
+
+
+@st.cache_data(ttl=3600)
+def obtener_a3500():
+    """Trae el A3500 (tipo de cambio mayorista de referencia) más reciente
+    publicado por el BCRA, vía la misma API que usa app.py (Monitor de
+    Liquidez BCRA) - variable 5. Se usa para el put BCRA de BOPREAL (Valor
+    Técnico × A3500). Devuelve (valor, fecha) o (None, None) si falla."""
+    try:
+        hoy = date.today().strftime("%Y-%m-%d")
+        desde = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+        url = f"https://api.bcra.gob.ar/estadisticas/v4.0/monetarias/5?desde={desde}&hasta={hoy}"
+        r = requests.get(url, verify=False, timeout=10)
+        r.raise_for_status()
+        resultados = r.json().get("results", [])
+        if resultados and resultados[0].get("detalle"):
+            ultimo = resultados[0]["detalle"][-1]
+            return float(ultimo["valor"]), ultimo["fecha"]
+    except Exception:
+        pass
+    return None, None
+
+
+@st.cache_data(ttl=3600)
+def obtener_valor_afip_bopreal():
+    """Trae el "Valor del BOPREAL" más reciente publicado por AFIP/ARCA
+    (scraping de la tabla HTML estática que arma
+    servicioscf.afip.gob.ar/publico/byma/bopreal.aspx - el iframe que
+    incrusta valores-diarios.asp). No es una API documentada: si AFIP
+    cambia el formato de esa página esto puede dejar de funcionar - en ese
+    caso hay que cargar el valor a mano en la tab YAS. Devuelve
+    (valor_pesos, fecha_texto) o (None, None) si falla.
+
+    OJO: esta página publica UN solo valor por día, sin desglosar por
+    serie/clase de BOPREAL (BPOA7/B7/C7/D7/A8/B8) - no está confirmado a
+    cuál corresponde exactamente, así que se muestra como referencia para
+    que la usuaria lo convierta a mano a % del capital vigente."""
+    try:
+        r = requests.get(
+            "https://servicioscf.afip.gob.ar/publico/byma/bopreal.aspx?paginado=10",
+            timeout=10,
+        )
+        r.raise_for_status()
+        m = re.search(
+            r'data-title="Fecha"[^>]*>([\d/]+)</td>\s*<td data-title="Valor del BOPREAL">\$\s*([\d.,]+)</td>',
+            r.text,
+        )
+        if not m:
+            return None, None
+        fecha_txt, valor_txt = m.group(1), m.group(2)
+        valor = float(valor_txt.replace(".", "").replace(",", "."))
+        return valor, fecha_txt
+    except Exception:
+        return None, None
 
 
 def selector_escenario(bond: Bond, key_prefix: str, settlement: date):
@@ -272,13 +385,11 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date):
     del módulo). Devuelve (put_date, put_price_pct), ambos None si no
     aplica o si se eligió vencimiento normal.
 
-    La fecha de ejercicio NUNCA puede ser anterior (ni igual) al
-    settlement - el motor de cálculo asume que se cobra un flujo FUTURO,
-    así que una fecha de put ya pasada respecto del settlement rompe la
-    cuenta (duration/precio negativos, sin sentido). Por eso `min_value`
-    del date_input está clavado en el día siguiente al settlement, aunque
-    la fecha "oficial" desde la que se habilita el put (según el
-    cronograma cargado) haya sido anterior."""
+    Por default se asume que el put se ejerce el mismo día del settlement
+    (fecha de ejecución = fecha de valuación) - pedido explícito. Esa
+    fecha es editable para simular un ejercicio más adelante; nunca puede
+    ser ANTERIOR al settlement (el motor de cálculo asume que se cobra un
+    flujo futuro-o-presente, no pasado)."""
     if not bond.puts:
         return None, None
 
@@ -290,21 +401,70 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date):
         return None, None
 
     st.caption(f"Ejercicio del put habilitado desde el {fecha_desde_default}.")
-    minimo_ejercicio = settlement + timedelta(days=1)
-    default_ejercicio = max(fecha_desde_default, minimo_ejercicio)
-    col_f, col_p = st.columns(2)
+    col_f, _ = st.columns(2)
     with col_f:
         put_date = st.date_input(
-            "Fecha de ejercicio del put", value=default_ejercicio, min_value=minimo_ejercicio,
+            "Fecha de ejecución del put", value=settlement, min_value=settlement,
             key=f"{key_prefix}_put_fecha",
         )
-    with col_p:
+    if put_date < fecha_desde_default:
+        st.warning(f"El put recién se puede ejercer desde el {fecha_desde_default}. Igual se calcula con la fecha elegida.")
+
+    tipo_put = st.radio(
+        "Precio del put", ["Manual (% del capital vigente)", "BCRA (Valor Técnico × A3500)", "AFIP/ARCA (valor publicado)"],
+        key=f"{key_prefix}_put_tipo",
+    )
+
+    if tipo_put == "Manual (% del capital vigente)":
         put_price_pct = st.number_input(
             "Precio del put (% del capital vigente)", value=precio_default, step=0.5,
             format=f"%.{DEC}f", key=f"{key_prefix}_put_precio",
         )
-    if put_date < fecha_desde_default:
-        st.warning(f"El put recién se puede ejercer desde el {fecha_desde_default}. Igual se calcula con la fecha elegida.")
+    elif tipo_put == "BCRA (Valor Técnico × A3500)":
+        # Valor Técnico × A3500: en USD-equivalente (dividiendo por el
+        # mismo A3500) esto es exactamente el 100% del capital vigente +
+        # interés corrido al momento del ejercicio - lo que este motor ya
+        # calcula solo con put_price_pct=100. El A3500 acá es solo para
+        # mostrar el monto en PESOS que efectivamente liquidaría el BCRA
+        # (informativo), no cambia el precio en USD.
+        a3500_api, fecha_a3500 = obtener_a3500()
+        if a3500_api is None:
+            st.warning("No se pudo obtener el A3500 del BCRA (revisá la conexión). Cargalo a mano.")
+        col_a, _ = st.columns(2)
+        with col_a:
+            a3500 = st.number_input(
+                "A3500 (ARS/USD)", value=a3500_api or 0.0, step=1.0, format="%.4f",
+                key=f"{key_prefix}_a3500",
+                help=f"Último publicado por el BCRA: {fecha_a3500}" if fecha_a3500 else "Sin dato de la API - cargalo a mano.",
+            )
+        put_price_pct = 100.0
+        valor_tecnico = bond.outstanding_pct(settlement) + bond.accrued_interest(settlement)
+        if a3500 > 0:
+            st.caption(
+                f"Valor Técnico ≈ USD {fmt_es(valor_tecnico)} (por 100 de face original) × A3500 {fmt_es(a3500, 4)} "
+                f"≈ $ {fmt_es(valor_tecnico * a3500)} por cada 100 de face original."
+            )
+    else:
+        valor_afip_api, fecha_afip = obtener_valor_afip_bopreal()
+        if valor_afip_api is None:
+            st.warning("No se pudo obtener el valor de AFIP/ARCA (revisá la conexión, o puede haber cambiado la página). Cargalo a mano.")
+        col_v, col_e = st.columns(2)
+        with col_v:
+            st.number_input(
+                "Valor AFIP/ARCA publicado ($)", value=valor_afip_api or 0.0, step=0.01, format="%.2f",
+                key=f"{key_prefix}_afip_valor",
+                help=f"Último publicado: {fecha_afip}" if fecha_afip else "Sin dato - cargalo a mano.",
+            )
+        st.caption(
+            "AFIP/ARCA publica un solo valor por día, sin desglosar por serie/clase de BOPREAL - "
+            "convertilo vos a % del capital vigente (no está confirmado a qué serie corresponde exactamente)."
+        )
+        with col_e:
+            put_price_pct = st.number_input(
+                "Equivalente en % del capital vigente", value=100.0, step=0.5,
+                format=f"%.{DEC}f", key=f"{key_prefix}_afip_pct",
+            )
+
     return put_date, put_price_pct
 
 
@@ -379,28 +539,53 @@ with tab_yas:
         put_date, put_precio = selector_escenario(bond, "yas", settlement)
 
         modo = st.radio(
-            "Ingresar por", ["Yield %", "Precio limpio", "Precio sucio"], key="yas_modo",
+            "Ingresar por", ["Yield %", "Precio Clean", "Precio Dirty"], key="yas_modo",
         )
 
-        if modo == "Precio limpio":
-            clean_price_in = st.number_input("Precio limpio", value=100.0, step=0.25, format=f"%.{DEC}f", key="yas_price")
-            summary = bond.summary(settlement, clean_price=clean_price_in, put_date=put_date, put_price_pct=put_precio)
-        elif modo == "Precio sucio":
+        if modo == "Precio Clean":
+            # El precio Clean se cotiza por 100 de capital VIGENTE (no del
+            # face original) - ver clean_mercado_a_original(). Para un bono
+            # que no amortizo nada todavia es exactamente lo mismo.
+            clean_price_in = st.number_input("Precio Clean", value=100.0, step=0.25, format=f"%.{DEC}f", key="yas_price")
+            clean_original_in = clean_mercado_a_original(bond, clean_price_in, settlement)
+            summary = bond.summary(settlement, clean_price=clean_original_in, put_date=put_date, put_price_pct=put_precio)
+        elif modo == "Precio Dirty":
             # Pedido explícito para los Globales: poder cargar directamente
-            # el precio SUCIO (lo que realmente se paga) en vez de tener
-            # que restar a mano el interés corrido para llegar al limpio.
-            dirty_price_in = st.number_input("Precio sucio", value=100.0, step=0.25, format=f"%.{DEC}f", key="yas_dirty_price")
+            # el precio Dirty (lo que realmente se paga) en vez de tener
+            # que restar a mano el interés corrido para llegar al Clean.
+            dirty_price_in = st.number_input("Precio Dirty", value=100.0, step=0.25, format=f"%.{DEC}f", key="yas_dirty_price")
             accrued_preview = bond.accrued_interest(settlement)
             clean_price_calc = dirty_price_in - accrued_preview
-            st.caption(f"Interés corrido: {fmt_es(accrued_preview)} → precio limpio implícito: {fmt_es(clean_price_calc)}")
+            st.caption(f"Interés corrido: {fmt_es(accrued_preview)} → precio Clean implícito: {fmt_es(clean_price_calc)}")
             summary = bond.summary(settlement, clean_price=clean_price_calc, put_date=put_date, put_price_pct=put_precio)
         else:
-            ytm_default = cargar_ultimo_yield(nombre_sel)
-            ytm_in = st.number_input(
-                "Yield %", value=ytm_default, step=0.1, format=f"%.{DEC}f", key=f"yas_ytm_{nombre_sel}",
+            # La tasa se puede tipear en TEA (la convención nativa del motor
+            # de cálculo, resuelta como XIRR), TNA Semianual o Semi Anual -
+            # se convierte a TEA antes de pricear, y se vuelve a convertir
+            # para mostrar el valor guardado la próxima vez que se abre
+            # este bono.
+            convencion = st.radio(
+                "Convención", ["TEA", "TNA Semianual", "Semi Anual"], horizontal=True, key="yas_convencion",
             )
-            guardar_ultimo_yield(nombre_sel, ytm_in)
-            summary = bond.summary(settlement, ytm_pct=ytm_in, put_date=put_date, put_price_pct=put_precio)
+            tea_guardada = cargar_ultimo_yield(nombre_sel)
+            if convencion == "TNA Semianual":
+                valor_default = tea_a_tna(tea_guardada)
+            elif convencion == "Semi Anual":
+                valor_default = tna_a_semi(tea_a_tna(tea_guardada))
+            else:
+                valor_default = tea_guardada
+            tea_in_raw = st.number_input(
+                f"Yield {convencion} %", value=valor_default, step=0.1, format=f"%.{DEC}f",
+                key=f"yas_tea_{nombre_sel}_{convencion}",
+            )
+            if convencion == "TNA Semianual":
+                tea_in = tna_a_tea(tea_in_raw)
+            elif convencion == "Semi Anual":
+                tea_in = tna_a_tea(semi_a_tna(tea_in_raw))
+            else:
+                tea_in = tea_in_raw
+            guardar_ultimo_yield(nombre_sel, tea_in)
+            summary = bond.summary(settlement, tea_pct=tea_in, put_date=put_date, put_price_pct=put_precio)
 
     with col_grid:
         st.markdown("#### Resultado")
@@ -408,15 +593,20 @@ with tab_yas:
         st.markdown(f'<div class="yas-value">{isin_txt}</div>', unsafe_allow_html=True)
         g1, g2 = st.columns(2)
         with g1:
-            st.markdown('<div class="yas-label">YIELD %</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["ytm_pct"])}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">PRECIO LIMPIO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["precio_limpio"])}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">PRECIO SUCIO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["precio_sucio"])}</div>', unsafe_allow_html=True)
+            st.markdown('<div class="yas-label">YIELD TEA %</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["tea_pct"])}</div>', unsafe_allow_html=True)
+            st.markdown('<div class="yas-label">YIELD TNA SEMIANUAL %</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(tea_a_tna(summary["tea_pct"]))}</div>', unsafe_allow_html=True)
+            st.markdown('<div class="yas-label">YIELD SEMI ANUAL %</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(tna_a_semi(tea_a_tna(summary["tea_pct"])))}</div>', unsafe_allow_html=True)
+            precio_clean_mercado = clean_original_a_mercado(bond, summary["precio_clean"], settlement)
+            st.markdown('<div class="yas-label">PRECIO CLEAN</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(precio_clean_mercado)}</div>', unsafe_allow_html=True)
+            st.markdown('<div class="yas-label">PRECIO DIRTY</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="yas-value">{fmt_es(summary["precio_dirty"])}</div>', unsafe_allow_html=True)
             st.markdown('<div class="yas-label">INTERÉS CORRIDO</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{fmt_es(summary["interes_corrido"])}</div>', unsafe_allow_html=True)
-            paridad_val = bond.paridad(summary["precio_limpio"], settlement)
+            paridad_val = bond.paridad(summary["precio_clean"], settlement)
             st.markdown('<div class="yas-label">PARIDAD</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="yas-value">{fmt_es(paridad_val)}</div>', unsafe_allow_html=True)
         with g2:
@@ -442,6 +632,11 @@ with tab_monitor:
         "Editá precio o yield (bid/offer) directo en la tabla. Siempre a vencimiento normal "
         "(sin considerar puts de BOPREAL) — para pricear un escenario de put puntual usá la tab YAS."
     )
+    st.caption(
+        "PX BID/PX OFFER: para Bonares y BOPREAL se cargan en Dirty por default; para Globales, "
+        "en Clean por default. CLEAN/DIRTY (mid) siempre muestran ambos valores, sea cual sea "
+        "la convención de entrada de cada fila."
+    )
 
     monitor_universe = filtrar_por_categoria(registry, key="cat_monitor")
 
@@ -450,9 +645,19 @@ with tab_monitor:
     for k in (px_bid_key, px_offer_key, yld_bid_key, yld_offer_key):
         st.session_state.setdefault(k, {})
 
+    def _es_dirty_por_default(categoria: str) -> bool:
+        """Bonares y BOPREAL se operan/cotizan en precio Dirty; Globales, en
+        precio Clean - ver pedido explícito de la usuaria."""
+        return categoria in ("Bonar", "Bopreal")
+
     col_modo, col_settle = st.columns([1, 1])
     with col_modo:
         modo_mesa = st.radio("Ingresar por", ["Yield", "Precio"], horizontal=True, key="mesa_modo")
+        convencion_mesa = "TEA"
+        if modo_mesa == "Yield":
+            convencion_mesa = st.radio(
+                "Convención", ["TEA", "TNA Semianual", "Semi Anual"], horizontal=True, key="mesa_convencion",
+            )
     with col_settle:
         mesa_settlement = ajustar_settlement(
             st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
@@ -462,6 +667,10 @@ with tab_monitor:
         if n not in st.session_state[yld_bid_key]:
             bono_seed = monitor_universe[monitor_universe["nombre"] == n].iloc[0]
             b_seed = make_bond(bono_seed)
+            # Todo se guarda internamente siempre en (TEA, precio Clean) sin
+            # importar la categoría - la convención de entrada/visualización
+            # (Dirty/Clean, TEA/TNA/Semi) es solo una capa de conversión al
+            # mostrar/editar la tabla (ver mas abajo).
             st.session_state[yld_bid_key][n] = 10.00
             st.session_state[yld_offer_key][n] = 9.50
             st.session_state[px_bid_key][n] = b_seed.clean_price(10.00, mesa_settlement)
@@ -472,42 +681,77 @@ with tab_monitor:
         n = row["nombre"]
         bono_row = registry[registry["nombre"] == n].iloc[0]
         b = make_bond(bono_row)
+        dirty_por_default = _es_dirty_por_default(row["categoria"])
+        dias_vto = (row["maturity"] - mesa_settlement).days
 
-        px_bid = st.session_state[px_bid_key][n]
-        px_offer = st.session_state[px_offer_key][n]
-        yield_bid = st.session_state[yld_bid_key][n]
-        yield_offer = st.session_state[yld_offer_key][n]
+        px_bid_clean = st.session_state[px_bid_key][n]
+        px_offer_clean = st.session_state[px_offer_key][n]
+        yield_bid_tea = st.session_state[yld_bid_key][n]
+        yield_offer_tea = st.session_state[yld_offer_key][n]
 
-        px_mid = (px_bid + px_offer) / 2
-        s_mid = b.summary(mesa_settlement, clean_price=px_mid)
+        px_mid_clean = (px_bid_clean + px_offer_clean) / 2
+        accrued = b.accrued_interest(mesa_settlement)
+        s_mid = b.summary(mesa_settlement, clean_price=px_mid_clean)
+
+        # PX BID/OFFER: lo que se ve/edita en la tabla, en la convención
+        # (Dirty o Clean) que le toca a esta fila según su categoría. Dirty
+        # se cotiza por 100 de face original (= clean + accrued, sin
+        # reescalar); Clean se cotiza por 100 de capital VIGENTE (ver
+        # clean_original_a_mercado) - dos convenciones distintas.
+        px_bid_mostrado = (
+            px_bid_clean + accrued if dirty_por_default else clean_original_a_mercado(b, px_bid_clean, mesa_settlement)
+        )
+        px_offer_mostrado = (
+            px_offer_clean + accrued if dirty_por_default else clean_original_a_mercado(b, px_offer_clean, mesa_settlement)
+        )
+
+        # YIELD BID/OFFER: lo que se ve/edita, en la convención elegida
+        # arriba (yield_bid_tea/yield_offer_tea se guardan siempre en TEA,
+        # la convención nativa del motor).
+        def _a_convencion(yield_tea):
+            if convencion_mesa == "TNA Semianual":
+                return tea_a_tna(yield_tea)
+            if convencion_mesa == "Semi Anual":
+                return tna_a_semi(tea_a_tna(yield_tea))
+            return yield_tea
+
+        yield_bid_mostrado = _a_convencion(yield_bid_tea)
+        yield_offer_mostrado = _a_convencion(yield_offer_tea)
+        yield_mid_tea = (yield_bid_tea + yield_offer_tea) / 2
 
         tabla_rows.append({
             "nombre": n,
             "isin": row.get("isin", ""),
             "codigo": row.get("codigo", ""),
-            "yield_bid": round(yield_bid, DEC),
-            "yield_offer": round(yield_offer, DEC),
-            "px_bid": round(px_bid, DEC),
-            "px_offer": round(px_offer, DEC),
-            "spread_bid_offer_bps": fmt_es((yield_bid - yield_offer) * 100),
+            "yield_bid": round(yield_bid_mostrado, DEC),
+            "yield_offer": round(yield_offer_mostrado, DEC),
+            "px_bid": round(px_bid_mostrado, DEC),
+            "px_offer": round(px_offer_mostrado, DEC),
+            "spread_bid_offer_bps": fmt_es((yield_bid_mostrado - yield_offer_mostrado) * 100),
+            "clean_mid": fmt_es(clean_original_a_mercado(b, px_mid_clean, mesa_settlement)),
+            "dirty_mid": fmt_es(px_mid_clean + accrued),
+            "paridad": fmt_es(b.paridad(px_mid_clean, mesa_settlement)),
+            "dias_vto": fmt_es(dias_vto, decimales=0),
             "maturity": row["maturity"],
             "cupon_vigente_pct": fmt_es(b.coupon_rate_at(date.today())),
             "duracion_modificada": fmt_es(s_mid["duracion_modificada"]),
-            "paridad": fmt_es(b.paridad(px_mid, mesa_settlement)),
+            "tir_tea_mid": fmt_es(yield_mid_tea),
+            "tir_tna_mid": fmt_es(tea_a_tna(yield_mid_tea)),
         })
     tabla_df = pd.DataFrame(tabla_rows)
 
     columnas_orden = ["nombre", "isin", "codigo", "yield_bid", "yield_offer", "px_bid", "px_offer",
-                      "spread_bid_offer_bps", "maturity", "cupon_vigente_pct", "duracion_modificada", "paridad"]
-    campos_fijos = ["nombre", "isin", "codigo", "spread_bid_offer_bps", "maturity", "cupon_vigente_pct",
-                    "duracion_modificada", "paridad"]
+                      "spread_bid_offer_bps", "clean_mid", "dirty_mid", "paridad", "dias_vto", "maturity",
+                      "cupon_vigente_pct", "duracion_modificada", "tir_tea_mid", "tir_tna_mid"]
+    campos_fijos = ["nombre", "isin", "codigo", "spread_bid_offer_bps", "clean_mid", "dirty_mid", "paridad",
+                     "dias_vto", "maturity", "cupon_vigente_pct", "duracion_modificada", "tir_tea_mid", "tir_tna_mid"]
     if modo_mesa == "Precio":
         disabled_cols = campos_fijos + ["yield_bid", "yield_offer"]
     else:
         disabled_cols = campos_fijos + ["px_bid", "px_offer"]
 
     nombres_orden_mesa = monitor_universe["nombre"].tolist()
-    mesa_editor_key = f"tabla_editor_ar_{modo_mesa}"
+    mesa_editor_key = f"tabla_editor_ar_{modo_mesa}_{convencion_mesa}"
 
     def _mesa_on_edit():
         estado = st.session_state.get(mesa_editor_key, {})
@@ -515,24 +759,40 @@ with tab_monitor:
             n = nombres_orden_mesa[idx]
             bono_row = registry[registry["nombre"] == n].iloc[0]
             b = make_bond(bono_row)
+            dirty_por_default = _es_dirty_por_default(bono_row["categoria"])
             if modo_mesa == "Precio":
                 if "px_bid" in cambios:
-                    px_bid = float(cambios["px_bid"])
-                    st.session_state[px_bid_key][n] = px_bid
-                    st.session_state[yld_bid_key][n] = b.yield_from_clean_price(px_bid, mesa_settlement)
+                    valor_in = float(cambios["px_bid"])
+                    clean_bid = (
+                        valor_in - b.accrued_interest(mesa_settlement) if dirty_por_default
+                        else clean_mercado_a_original(b, valor_in, mesa_settlement)
+                    )
+                    st.session_state[px_bid_key][n] = clean_bid
+                    st.session_state[yld_bid_key][n] = b.yield_from_clean_price(clean_bid, mesa_settlement)
                 if "px_offer" in cambios:
-                    px_offer = float(cambios["px_offer"])
-                    st.session_state[px_offer_key][n] = px_offer
-                    st.session_state[yld_offer_key][n] = b.yield_from_clean_price(px_offer, mesa_settlement)
+                    valor_in = float(cambios["px_offer"])
+                    clean_offer = (
+                        valor_in - b.accrued_interest(mesa_settlement) if dirty_por_default
+                        else clean_mercado_a_original(b, valor_in, mesa_settlement)
+                    )
+                    st.session_state[px_offer_key][n] = clean_offer
+                    st.session_state[yld_offer_key][n] = b.yield_from_clean_price(clean_offer, mesa_settlement)
             else:
+                def _a_tea(valor_in):
+                    if convencion_mesa == "TNA Semianual":
+                        return tna_a_tea(valor_in)
+                    if convencion_mesa == "Semi Anual":
+                        return tna_a_tea(semi_a_tna(valor_in))
+                    return valor_in
+
                 if "yield_bid" in cambios:
-                    yield_bid = float(cambios["yield_bid"])
-                    st.session_state[yld_bid_key][n] = yield_bid
-                    st.session_state[px_bid_key][n] = b.clean_price(yield_bid, mesa_settlement)
+                    yield_bid_tea = _a_tea(float(cambios["yield_bid"]))
+                    st.session_state[yld_bid_key][n] = yield_bid_tea
+                    st.session_state[px_bid_key][n] = b.clean_price(yield_bid_tea, mesa_settlement)
                 if "yield_offer" in cambios:
-                    yield_offer = float(cambios["yield_offer"])
-                    st.session_state[yld_offer_key][n] = yield_offer
-                    st.session_state[px_offer_key][n] = b.clean_price(yield_offer, mesa_settlement)
+                    yield_offer_tea = _a_tea(float(cambios["yield_offer"]))
+                    st.session_state[yld_offer_key][n] = yield_offer_tea
+                    st.session_state[px_offer_key][n] = b.clean_price(yield_offer_tea, mesa_settlement)
 
     st.data_editor(
         tabla_df[columnas_orden],
@@ -543,15 +803,20 @@ with tab_monitor:
             "nombre": st.column_config.TextColumn("NOMBRE"),
             "isin": st.column_config.TextColumn("ISIN"),
             "codigo": st.column_config.TextColumn("CÓDIGO"),
-            "yield_bid": st.column_config.NumberColumn("YIELD BID %", format=f"%.{DEC}f"),
-            "yield_offer": st.column_config.NumberColumn("YIELD OFFER %", format=f"%.{DEC}f"),
+            "yield_bid": st.column_config.NumberColumn(f"YIELD BID {convencion_mesa} %", format=f"%.{DEC}f"),
+            "yield_offer": st.column_config.NumberColumn(f"YIELD OFFER {convencion_mesa} %", format=f"%.{DEC}f"),
             "px_bid": st.column_config.NumberColumn("PX BID", format=f"%.{DEC}f"),
             "px_offer": st.column_config.NumberColumn("PX OFFER", format=f"%.{DEC}f"),
             "spread_bid_offer_bps": st.column_config.TextColumn("SPREAD B/O (BPS)"),
+            "clean_mid": st.column_config.TextColumn("CLEAN (MID)"),
+            "dirty_mid": st.column_config.TextColumn("DIRTY (MID)"),
+            "paridad": st.column_config.TextColumn("PARIDAD"),
+            "dias_vto": st.column_config.TextColumn("DAYS"),
             "maturity": st.column_config.DateColumn("VENCIMIENTO"),
             "cupon_vigente_pct": st.column_config.TextColumn("CUPÓN VIGENTE %"),
             "duracion_modificada": st.column_config.TextColumn("MOD. DURATION"),
-            "paridad": st.column_config.TextColumn("PARIDAD"),
+            "tir_tea_mid": st.column_config.TextColumn("TIR TEA (MID)"),
+            "tir_tna_mid": st.column_config.TextColumn("TIR TNA SEMIANUAL (MID)"),
         },
         key=mesa_editor_key,
         on_change=_mesa_on_edit,
@@ -585,15 +850,13 @@ with tab_fras:
     for _, row in curva.iterrows():
         n = row["nombre"]
         dias = int(row["dias_vto"])
-        yld_semi = st.session_state[fras_yield_key][n]
-        tea = ((1 + yld_semi / 100 / 2) ** 2 - 1) * 100
-        tna = (365 / dias) * ((1 + tea / 100) ** (dias / 365) - 1) * 100 if dias > 0 else 0.0
+        yld_tea = st.session_state[fras_yield_key][n]
         input_rows.append({
             "bono": n,
             "dias_vto": fmt_es(dias, decimales=0),
-            "yield_semianual": round(yld_semi, DEC),
-            "yield_anual": round(tea, DEC),
-            "tna": round(tna, DEC),
+            "tea": round(yld_tea, DEC),
+            "tna_semianual": round(tea_a_tna(yld_tea), DEC),
+            "yield_semianual": round(tna_a_semi(tea_a_tna(yld_tea)), DEC),
         })
     input_df = pd.DataFrame(input_rows)
 
@@ -603,21 +866,21 @@ with tab_fras:
     def _fras_on_edit():
         estado = st.session_state.get(fras_editor_key, {})
         for idx, cambios in estado.get("edited_rows", {}).items():
-            if "yield_semianual" in cambios:
+            if "tea" in cambios:
                 n = nombres_orden_fras[idx]
-                st.session_state[fras_yield_key][n] = float(cambios["yield_semianual"])
+                st.session_state[fras_yield_key][n] = float(cambios["tea"])
 
     st.data_editor(
         input_df,
         use_container_width=True,
         hide_index=True,
-        disabled=["bono", "dias_vto", "yield_anual", "tna"],
+        disabled=["bono", "dias_vto", "tna_semianual", "yield_semianual"],
         column_config={
             "bono": st.column_config.TextColumn("BONO"),
             "dias_vto": st.column_config.TextColumn("DÍAS AL VTO"),
+            "tea": st.column_config.NumberColumn("TEA %", format=f"%.{DEC}f"),
+            "tna_semianual": st.column_config.NumberColumn("TNA SEMIANUAL %", format=f"%.{DEC}f"),
             "yield_semianual": st.column_config.NumberColumn("YIELD SEMIANUAL %", format=f"%.{DEC}f"),
-            "yield_anual": st.column_config.NumberColumn("YIELD ANUAL (TEA) %", format=f"%.{DEC}f"),
-            "tna": st.column_config.NumberColumn("TNA %", format=f"%.{DEC}f"),
         },
         key=fras_editor_key,
         on_change=_fras_on_edit,
@@ -628,18 +891,14 @@ with tab_fras:
     dias_por_bono = {n: int(curva[curva["nombre"] == n]["dias_vto"].iloc[0]) for n in nombres}
     anios_al_vto = {n: dias_por_bono[n] / 365 for n in nombres}
 
-    yield_semi = {n: st.session_state[fras_yield_key][n] for n in nombres}
-    yield_tea = {n: ((1 + yield_semi[n] / 100 / 2) ** 2 - 1) * 100 for n in nombres}
-    yield_tna = {
-        n: (365 / dias_por_bono[n]) * ((1 + yield_tea[n] / 100) ** (dias_por_bono[n] / 365) - 1) * 100
-        if dias_por_bono[n] > 0 else 0.0
-        for n in nombres
-    }
+    yield_tea = {n: st.session_state[fras_yield_key][n] for n in nombres}
+    yield_tna = {n: tea_a_tna(yield_tea[n]) for n in nombres}
+    yield_semi = {n: tna_a_semi(yield_tna[n]) for n in nombres}
 
     etiquetas = [codigos[n] for n in nombres]
     t_por_nodo = anios_al_vto
 
-    TASAS_BASE = {"Semi Anual": yield_semi, "Anual (TEA)": yield_tea, "TNA": yield_tna}
+    TASAS_BASE = {"TEA": yield_tea, "TNA Semianual": yield_tna, "Semi Anual": yield_semi}
 
     def forward_compounding(ti, ri, tj, rj):
         return ((1 + rj) ** tj / (1 + ri) ** ti) ** (1 / (tj - ti)) - 1

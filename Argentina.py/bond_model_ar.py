@@ -20,10 +20,22 @@ que tienen de particular los bonos argentinos en USD:
   ejercer es quien tiene el bono. Por eso NO se calcula automaticamente
   un escenario "to worst" - la app deja elegir a mano si se quiere
   pricear a vencimiento o al put (ver `puts` y `cashflows_a_escenario`).
+- DOS CONVENCIONES DE DIAS DISTINTAS EN EL MISMO BONO: el INTERES CORRIDO
+  (accrued) se calcula con 30/360 sobre el cronograma de cupones - la
+  convencion que usan los prospectos (Decreto 676/2020, SEC 424B5,
+  Comunicaciones BCRA). Pero el YIELD (la tasa que iguala el precio con
+  el valor presente de los flujos) se resuelve como un XIRR clasico
+  (Actual/365, capitalizacion anual efectiva): cada flujo se descuenta
+  por la cantidad REAL de dias calendario entre el settlement y su
+  fecha de pago, no por una cuenta de "periodos" de 30/360. Por eso la
+  tasa nativa de este motor es la TEA (tasa efectiva anual) directamente
+  - no una tasa nominal semestral como en bond_model.py de Paraguay/
+  Uruguay. TNA Semianual (la tasa nominal anual, base semestral) se
+  deriva de la TEA: TNA = ((1+TEA)^(180/360) - 1) * (360/180).
 
-El resto (30/360, precio limpio/sucio, duration, convexidad, paridad) es
-conceptualmente igual que en Paraguay/Uruguay - ver el docstring de
-bond_model.py para esas definiciones si hace falta repasarlas.
+El resto (paridad, capital vigente) es conceptualmente igual que en
+Paraguay/Uruguay - ver el docstring de bond_model.py para esas
+definiciones si hace falta repasarlas.
 """
 
 from dataclasses import dataclass, field
@@ -94,12 +106,21 @@ class Bond:
             escenarios en la moneda del resto de la app (USD), no una
             garantia de que el BCRA vaya a convalidar exactamente ese
             precio en dólares reales ese día.
+        coupon_anchor: fecha opcional que define el DIA regular del
+            cronograma de cupones (mes/dia), cuando ese dia NO coincide con
+            el de `maturity`. Pasa en AL29/GD29 (cupones el 9-ene/9-jul,
+            pero el vencimiento final cae el 10-jul) y AE38/GD38 (cupones
+            el 9-ene/9-jul, vencimiento final el 11-ene) - el vencimiento
+            "real" a veces corre uno o dos dias respecto del patron regular
+            de pagos. Si es None (el caso normal), se usa `maturity` como
+            ancla de todo el cronograma, sin diferencia.
     """
 
     coupon_schedule: list
     maturity: date
     face: float = 100.0
     freq: int = 2
+    coupon_anchor: date = None
     amortization: list = field(default_factory=list)
     puts: list = field(default_factory=list)
 
@@ -128,21 +149,31 @@ class Bond:
 
     def coupon_dates(self, settlement: date) -> list:
         """Reconstruye el calendario de pagos de cupon retrocediendo desde
-        el vencimiento en multiplos de `12/freq` meses. Devuelve la lista
-        ordenada cronologicamente: [cupon anterior al settlement,
-        ...cupones futuros..., vencimiento].
+        el ancla del cronograma (`coupon_anchor`, o `maturity` si no hay
+        uno distinto) en multiplos de `12/freq` meses, y usa `maturity`
+        como la fecha REAL del ultimo flujo. Devuelve la lista ordenada
+        cronologicamente: [cupon anterior al settlement, ...cupones
+        futuros..., vencimiento].
 
-        OJO: cada fecha se calcula SIEMPRE a partir de `self.maturity`
-        (nunca de la fecha anterior ya calculada) - importante para
+        OJO 1: las fechas intermedias se calculan SIEMPRE a partir del
+        ancla (nunca de la fecha anterior ya calculada) - importante para
         vencimientos en dia 31 (ej. BOPREAL, 31-oct/30-abr): si se
         encadenara add_months sobre la ultima fecha obtenida, el "30" de
         un mes corto (abril) se arrastraria para siempre y el resto de
-        las fechas de octubre saldrian en 30 en vez de 31."""
+        las fechas de octubre saldrian en 30 en vez de 31.
+
+        OJO 2: cuando `coupon_anchor` difiere de `maturity` (AL29/GD29,
+        AE38/GD38 - ver docstring de la clase), el ancla NO debe aparecer
+        como una fecha de cupon en si misma (seria un cupon extra,
+        redundante con el vencimiento real, a un dia o dos de distancia) -
+        por eso el loop empieza en k=1 (un periodo ANTES del ancla), no en
+        k=0."""
         step = 12 // self.freq
+        ancla = self.coupon_anchor or self.maturity
         dates = [self.maturity]
         k = 1
         while dates[-1] > settlement:
-            dates.append(add_months(self.maturity, -step * k))
+            dates.append(add_months(ancla, -step * k))
             k += 1
         dates.reverse()
         return dates
@@ -179,6 +210,13 @@ class Bond:
         Los numeros salen SIN redondear (el redondeo es cosa de la
         interfaz, no del motor de calculo) - ver el mismo comentario en
         bond_model.py.
+
+        Cada fila trae DOS medidas de "distancia" al flujo, para dos usos
+        distintos: "periodos"/"dias_desde_settlement_30_360" (30/360, solo
+        informativos/de referencia) y "dias_actual" (dias de calendario
+        reales, settlement -> fecha del flujo) - este ultimo es el que usa
+        dirty_price()/duration_convexity() para descontar (ver el XIRR en
+        el docstring del modulo).
         """
         prev_coupon, _, future, _, _, f = self.schedule(settlement)
         step_months = 12 // self.freq
@@ -205,6 +243,7 @@ class Bond:
                 rows.append({
                     "fecha": put_date,
                     "dias_desde_settlement_30_360": days_30_360(settlement, put_date),
+                    "dias_actual": (put_date - settlement).days,
                     "periodos": t_put,
                     "cupon": cupon_corrido,
                     "principal": monto_put,
@@ -235,6 +274,7 @@ class Bond:
                 rows.append({
                     "fecha": d,
                     "dias_desde_settlement_30_360": days_30_360(settlement, d),
+                    "dias_actual": (d - settlement).days,
                     "periodos": t,
                     "cupon": coupon_amt,
                     "principal": principal + monto_put,
@@ -245,6 +285,7 @@ class Bond:
             rows.append({
                 "fecha": d,
                 "dias_desde_settlement_30_360": days_30_360(settlement, d),
+                "dias_actual": (d - settlement).days,
                 "periodos": t,
                 "cupon": coupon_amt,
                 "principal": principal,
@@ -266,26 +307,43 @@ class Bond:
         coupon_amt = rate / 100 / self.freq * outstanding
         return coupon_amt * accrued_days / period_days
 
-    def dirty_price(self, ytm_pct: float, settlement: date, put_date: date = None,
+    def dirty_price(self, tea_pct: float, settlement: date, put_date: date = None,
                      put_price_pct: float = None) -> float:
-        """Precio sucio dado un yield: se descuentan todos los flujos
-        futuros (hasta el vencimiento, o hasta `put_date` si se pasa uno)
-        a la tasa ytm_pct y se suman (valor presente)."""
+        """Precio Dirty dado un yield: XIRR clasico - cada flujo se
+        descuenta por su cantidad REAL de dias calendario hasta el
+        settlement (Actual/365, capitalizacion anual efectiva), no por una
+        cuenta de periodos 30/360 (ver docstring del modulo)."""
         cf = self.cashflows(settlement, put_date, put_price_pct)
-        y2 = ytm_pct / 100 / self.freq  # tasa por periodo
-        pv = cf["flujo_total"] / (1 + y2) ** cf["periodos"]
+        r = tea_pct / 100
+        t_anios = cf["dias_actual"] / 365
+        pv = cf["flujo_total"] / (1 + r) ** t_anios
         return float(pv.sum())
 
-    def clean_price(self, ytm_pct: float, settlement: date, put_date: date = None,
+    def clean_price(self, tea_pct: float, settlement: date, put_date: date = None,
                      put_price_pct: float = None) -> float:
-        """Precio limpio = precio sucio menos el interes ya corrido."""
-        return self.dirty_price(ytm_pct, settlement, put_date, put_price_pct) - self.accrued_interest(settlement)
+        """Precio Clean = precio Dirty menos el interes ya
+        corrido (el interes corrido SI se calcula 30/360 - ver
+        accrued_interest)."""
+        return self.dirty_price(tea_pct, settlement, put_date, put_price_pct) - self.accrued_interest(settlement)
+
+    def outstanding_pct(self, settlement: date) -> float:
+        """Capital vigente en el settlement, en % del face ORIGINAL (100
+        menos lo ya amortizado). Publico (a diferencia de _outstanding_at)
+        porque la interfaz lo necesita para convertir entre precio "por 100
+        de face original" (la unidad nativa de clean_price/dirty_price) y
+        precio "por 100 de capital vigente" - la convencion de mercado para
+        el precio CLEAN de un bono ya parcialmente amortizado (verificado
+        contra una tabla de referencia real: el precio DIRTY se cotiza por
+        100 de face original tal cual sale de este motor, pero el precio
+        CLEAN se cotiza reescalado sobre el capital vigente, no sobre el
+        original - dos convenciones distintas conviviendo en el mismo bono)."""
+        prev_coupon, _, _, _, _, _ = self.schedule(settlement)
+        return self._outstanding_at(prev_coupon)
 
     def paridad(self, clean_price: float, settlement: date) -> float:
-        """Paridad = precio sucio / valor tecnico (capital vigente + interes
+        """Paridad = precio Dirty / valor tecnico (capital vigente + interes
         corrido), en %."""
-        prev_coupon, _, _, _, _, _ = self.schedule(settlement)
-        outstanding = self._outstanding_at(prev_coupon)
+        outstanding = self.outstanding_pct(settlement)
         accrued = self.accrued_interest(settlement)
         valor_tecnico = outstanding + accrued
         dirty = clean_price + accrued
@@ -293,9 +351,9 @@ class Bond:
 
     def yield_from_clean_price(self, clean_price: float, settlement: date, tol: float = 1e-8,
                                 max_iter: int = 100, put_date: date = None, put_price_pct: float = None) -> float:
-        """Dado un precio limpio, encuentra el yield que lo produce (para
-        un escenario dado - vencimiento normal, o un put puntual) por
-        busqueda binaria: el precio cae cuando el yield sube (relacion
+        """Dado un precio Clean, encuentra la TEA que lo produce (para un
+        escenario dado - vencimiento normal, o un put puntual) por
+        busqueda binaria: el precio cae cuando la tasa sube (relacion
         monotona), asi que se acota el intervalo [lo, hi] hasta converger."""
         lo, hi = -5.0, 40.0
         for _ in range(max_iter):
@@ -308,27 +366,31 @@ class Bond:
                 break
         return (lo + hi) / 2
 
-    def duration_convexity(self, ytm_pct: float, settlement: date, put_date: date = None,
+    def duration_convexity(self, tea_pct: float, settlement: date, put_date: date = None,
                             put_price_pct: float = None):
         """Sensibilidad del precio ante cambios de yield, para el escenario
-        elegido (vencimiento normal por defecto, o un put puntual)."""
+        elegido (vencimiento normal por defecto, o un put puntual). Con la
+        TEA como tasa nativa (capitalizacion anual efectiva), duration
+        modificada y convexidad ya no llevan la division por `freq` que
+        tenian en la version con tasa nominal semestral - los tiempos
+        `t` ya estan en años reales (dias_actual/365), no en "periodos"."""
         cf = self.cashflows(settlement, put_date, put_price_pct)
-        y2 = ytm_pct / 100 / self.freq
-        t = cf["periodos"]
-        pv = cf["flujo_total"] / (1 + y2) ** t
+        r = tea_pct / 100
+        t = cf["dias_actual"] / 365
+        pv = cf["flujo_total"] / (1 + r) ** t
         dirty = pv.sum()
-        macaulay_years = float((t * pv).sum() / dirty) / self.freq
-        modified_duration = macaulay_years / (1 + y2)
-        convexity = float((pv * t * (t + 1)).sum() / dirty) / (1 + y2) ** 2 / self.freq ** 2
+        macaulay_years = float((t * pv).sum() / dirty)
+        modified_duration = macaulay_years / (1 + r)
+        convexity = float((pv * t * (t + 1)).sum() / dirty) / (1 + r) ** 2
         return {
             "macaulay_years": macaulay_years,
             "modified_duration": modified_duration,
             "convexity": convexity,
         }
 
-    def summary(self, settlement: date, clean_price: float = None, ytm_pct: float = None,
+    def summary(self, settlement: date, clean_price: float = None, tea_pct: float = None,
                 put_date: date = None, put_price_pct: float = None) -> dict:
-        """Punto de entrada principal: le pasas precio O yield (uno de los
+        """Punto de entrada principal: le pasas precio O TEA (uno de los
         dos) para un escenario dado (vencimiento normal por defecto, o un
         put puntual si se pasan `put_date`/`put_price_pct`) y devuelve
         todo lo demas ya calculado y redondeado a 3 decimales.
@@ -337,22 +399,22 @@ class Bond:
         automaticamente entre vencimiento y calls), acá el escenario lo
         elige la usuaria a mano - ver el docstring del modulo sobre por
         que los puts de BOPREAL no se resuelven solos."""
-        if clean_price is None and ytm_pct is None:
-            raise ValueError("Pasa clean_price o ytm_pct")
+        if clean_price is None and tea_pct is None:
+            raise ValueError("Pasa clean_price o tea_pct")
 
-        if ytm_pct is None:
-            ytm_pct = self.yield_from_clean_price(clean_price, settlement, put_date=put_date, put_price_pct=put_price_pct)
+        if tea_pct is None:
+            tea_pct = self.yield_from_clean_price(clean_price, settlement, put_date=put_date, put_price_pct=put_price_pct)
         if clean_price is None:
-            clean_price = self.clean_price(ytm_pct, settlement, put_date, put_price_pct)
+            clean_price = self.clean_price(tea_pct, settlement, put_date, put_price_pct)
 
         accrued = self.accrued_interest(settlement)
-        dc = self.duration_convexity(ytm_pct, settlement, put_date, put_price_pct)
+        dc = self.duration_convexity(tea_pct, settlement, put_date, put_price_pct)
         return {
             "settlement": settlement,
-            "precio_limpio": round(clean_price, 3),
-            "precio_sucio": round(clean_price + accrued, 3),
+            "precio_clean": round(clean_price, 3),
+            "precio_dirty": round(clean_price + accrued, 3),
             "interes_corrido": round(accrued, 3),
-            "ytm_pct": round(ytm_pct, 3),
+            "tea_pct": round(tea_pct, 3),
             "duracion_macaulay_anios": round(dc["macaulay_years"], 3),
             "duracion_modificada": round(dc["modified_duration"], 3),
             "convexidad": round(dc["convexity"], 3),
