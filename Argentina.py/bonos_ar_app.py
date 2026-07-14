@@ -9,10 +9,12 @@ de bonos ni motor de calculo, aunque la estructura de la app es hermana.
 
 Particularidades de Argentina que no existian en Paraguay/Uruguay (ver
 bond_model_ar.py para el detalle matematico):
-    - CUPON ESCALONADO (step-up): AL29/AL30/AL35/AE38/AL41 (Bonares) y
-      GD29/GD30/GD35/GD38/GD41/GD46 (Globales) no tienen una tasa fija
-      unica - la tasa de cupon sube en fechas predeterminadas. AO27/AO28/
-      AN29 (bonos nuevos 2025-2026) y los BOPREAL si tienen tasa fija.
+    - CUPON ESCALONADO (step-up): AL30/AL35/AE38/AL41 (Bonares) y
+      GD30/GD35/GD38/GD41/GD46 (Globales) no tienen una tasa fija
+      unica - la tasa de cupon sube en fechas predeterminadas. AL29/GD29
+      son la excepcion de esa misma familia (1,00% fijo, sin step-up).
+      AO27/AO28/AN29 (bonos nuevos 2025-2026) y los BOPREAL tambien
+      tienen tasa fija.
     - AMORTIZACION en cuotas: los Bonares/Globales del canje 2020 y los
       BOPREAL Serie 1 amortizan en varias cuotas antes del vencimiento
       (los BOPREAL Serie 4 y AO27/AO28/AN29 son bullet).
