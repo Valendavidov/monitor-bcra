@@ -283,6 +283,31 @@ def clean_mercado_a_original(b: Bond, clean_mercado: float, settlement: date) ->
     return clean_mercado * b.outstanding_pct(settlement) / 100
 
 
+# =============================================================================
+# RECALCULO BIDIRECCIONAL: precio Clean / precio Dirty / TEA / TNA Semianual
+# =============================================================================
+# En Monitor de bonos y FRAs, las cuatro variables (precio Clean "de
+# mercado", precio Dirty, TEA y TNA Semianual) son todas editables: la
+# usuaria tipea CUALQUIERA de las cuatro y las otras tres se recalculan
+# solas. Para eso alcanza con guardar UN solo estado canonico por bono
+# (el precio clean "original", por 100 de face original - la unidad
+# nativa del motor) y reconstruir las cuatro columnas a partir de eso.
+def resolver_desde_clean(b: Bond, clean_original: float, settlement: date) -> dict:
+    accrued = b.accrued_interest(settlement)
+    tea = b.yield_from_clean_price(clean_original, settlement)
+    return {
+        "clean_original": clean_original,
+        "tea": tea,
+        "clean_mercado": clean_original_a_mercado(b, clean_original, settlement),
+        "dirty": clean_original + accrued,
+    }
+
+
+def resolver_desde_tea(b: Bond, tea: float, settlement: date) -> dict:
+    clean_original = b.clean_price(tea, settlement)
+    return resolver_desde_clean(b, clean_original, settlement)
+
+
 def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
     categorias = ["Todas"] + sorted(df["categoria"].unique().tolist())
     elegida = st.radio("Categoría", categorias, horizontal=True, key=key)
@@ -608,190 +633,104 @@ with tab_yas:
 with tab_monitor:
     st.subheader("Monitor de bonos")
     st.caption(
-        "Editá precio o yield (bid/offer) directo en la tabla. Siempre a vencimiento normal "
-        "(sin considerar puts de BOPREAL) — para pricear un escenario de put puntual usá la tab YAS."
-    )
-    st.caption(
-        "PX BID/PX OFFER: para Bonares y BOPREAL se cargan en Dirty por default; para Globales, "
-        "en Clean por default. CLEAN/DIRTY (mid) siempre muestran ambos valores, sea cual sea "
-        "la convención de entrada de cada fila."
+        "Editá cualquiera de las cuatro columnas — PRECIO CLEAN, PRECIO DIRTY, TEA o TNA SEMIANUAL — "
+        "las otras tres se recalculan solas. Siempre a vencimiento normal (sin considerar puts de "
+        "BOPREAL) — para pricear un escenario de put puntual usá la tab YAS."
     )
 
     monitor_universe = filtrar_por_categoria(registry, key="cat_monitor")
 
-    px_bid_key, px_offer_key = "mesa_px_bid_ar", "mesa_px_offer_ar"
-    yld_bid_key, yld_offer_key = "mesa_yield_bid_ar", "mesa_yield_offer_ar"
-    for k in (px_bid_key, px_offer_key, yld_bid_key, yld_offer_key):
-        st.session_state.setdefault(k, {})
+    clean_key = "mesa_clean_original_ar"
+    st.session_state.setdefault(clean_key, {})
 
-    def _es_dirty_por_default(categoria: str) -> bool:
-        """Bonares y BOPREAL se operan/cotizan en precio Dirty; Globales, en
-        precio Clean - ver pedido explícito de la usuaria."""
-        return categoria in ("Bonar", "Bopreal")
-
-    col_modo, col_settle = st.columns([1, 1])
-    with col_modo:
-        modo_mesa = st.radio("Ingresar por", ["Yield", "Precio"], horizontal=True, key="mesa_modo")
-        convencion_mesa = "TEA"
-        if modo_mesa == "Yield":
-            convencion_mesa = st.radio(
-                "Convención", ["TEA", "TNA Semianual"], horizontal=True, key="mesa_convencion",
-            )
-    with col_settle:
-        mesa_settlement = ajustar_settlement(
-            st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
-        )
+    mesa_settlement = ajustar_settlement(
+        st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
+    )
 
     for n in monitor_universe["nombre"]:
-        if n not in st.session_state[yld_bid_key]:
+        if n not in st.session_state[clean_key]:
             bono_seed = monitor_universe[monitor_universe["nombre"] == n].iloc[0]
             b_seed = make_bond(bono_seed)
-            # Todo se guarda internamente siempre en (TEA, precio Clean) sin
-            # importar la categoría - la convención de entrada/visualización
-            # (Dirty/Clean, TEA/TNA Semianual) es solo una capa de conversión
-            # al mostrar/editar la tabla (ver mas abajo).
-            st.session_state[yld_bid_key][n] = 10.00
-            st.session_state[yld_offer_key][n] = 9.50
-            st.session_state[px_bid_key][n] = b_seed.clean_price(10.00, mesa_settlement)
-            st.session_state[px_offer_key][n] = b_seed.clean_price(9.50, mesa_settlement)
+            # Semilla: TEA 10% de referencia, guardada como precio Clean
+            # "original" (la unidad nativa del motor) - de ahí se derivan
+            # las cuatro columnas editables (ver resolver_desde_clean).
+            st.session_state[clean_key][n] = b_seed.clean_price(10.00, mesa_settlement)
 
     tabla_rows = []
     for _, row in monitor_universe.iterrows():
         n = row["nombre"]
         bono_row = registry[registry["nombre"] == n].iloc[0]
         b = make_bond(bono_row)
-        dirty_por_default = _es_dirty_por_default(row["categoria"])
         dias_vto = (row["maturity"] - mesa_settlement).days
 
-        px_bid_clean = st.session_state[px_bid_key][n]
-        px_offer_clean = st.session_state[px_offer_key][n]
-        yield_bid_tea = st.session_state[yld_bid_key][n]
-        yield_offer_tea = st.session_state[yld_offer_key][n]
-
-        px_mid_clean = (px_bid_clean + px_offer_clean) / 2
-        accrued = b.accrued_interest(mesa_settlement)
-        s_mid = b.summary(mesa_settlement, clean_price=px_mid_clean)
-
-        # PX BID/OFFER: lo que se ve/edita en la tabla, en la convención
-        # (Dirty o Clean) que le toca a esta fila según su categoría. Dirty
-        # se cotiza por 100 de face original (= clean + accrued, sin
-        # reescalar); Clean se cotiza por 100 de capital VIGENTE (ver
-        # clean_original_a_mercado) - dos convenciones distintas.
-        px_bid_mostrado = (
-            px_bid_clean + accrued if dirty_por_default else clean_original_a_mercado(b, px_bid_clean, mesa_settlement)
-        )
-        px_offer_mostrado = (
-            px_offer_clean + accrued if dirty_por_default else clean_original_a_mercado(b, px_offer_clean, mesa_settlement)
-        )
-
-        # YIELD BID/OFFER: lo que se ve/edita, en la convención elegida
-        # arriba (yield_bid_tea/yield_offer_tea se guardan siempre en TEA,
-        # la convención nativa del motor).
-        def _a_convencion(yield_tea):
-            if convencion_mesa == "TNA Semianual":
-                return tea_a_tna(yield_tea)
-            return yield_tea
-
-        yield_bid_mostrado = _a_convencion(yield_bid_tea)
-        yield_offer_mostrado = _a_convencion(yield_offer_tea)
-        yield_mid_tea = (yield_bid_tea + yield_offer_tea) / 2
+        clean_original = st.session_state[clean_key][n]
+        estado = resolver_desde_clean(b, clean_original, mesa_settlement)
 
         tabla_rows.append({
             "nombre": n,
             "isin": row.get("isin", ""),
             "codigo": row.get("codigo", ""),
-            "yield_bid": round(yield_bid_mostrado, DEC),
-            "yield_offer": round(yield_offer_mostrado, DEC),
-            "px_bid": round(px_bid_mostrado, DEC),
-            "px_offer": round(px_offer_mostrado, DEC),
-            "spread_bid_offer_bps": fmt_es((yield_bid_mostrado - yield_offer_mostrado) * 100),
-            "clean_mid": fmt_es(clean_original_a_mercado(b, px_mid_clean, mesa_settlement)),
-            "dirty_mid": fmt_es(px_mid_clean + accrued),
-            "paridad": fmt_es(b.paridad(px_mid_clean, mesa_settlement)),
+            "precio_clean": round(estado["clean_mercado"], DEC),
+            "precio_dirty": round(estado["dirty"], DEC),
+            "tea": round(estado["tea"], DEC),
+            "tna_semianual": round(tea_a_tna(estado["tea"]), DEC),
+            "paridad": fmt_es(b.paridad(clean_original, mesa_settlement)),
             "dias_vto": fmt_es(dias_vto, decimales=0),
             "maturity": row["maturity"],
             "cupon_vigente_pct": fmt_es(b.coupon_rate_at(date.today())),
-            "duracion_modificada": fmt_es(s_mid["duracion_modificada"]),
-            "tir_tea_mid": fmt_es(yield_mid_tea),
-            "tir_tna_mid": fmt_es(tea_a_tna(yield_mid_tea)),
+            "duracion_modificada": fmt_es(
+                b.duration_convexity(estado["tea"], mesa_settlement)["modified_duration"]
+            ),
         })
     tabla_df = pd.DataFrame(tabla_rows)
 
-    columnas_orden = ["nombre", "isin", "codigo", "yield_bid", "yield_offer", "px_bid", "px_offer",
-                      "spread_bid_offer_bps", "clean_mid", "dirty_mid", "paridad", "dias_vto", "maturity",
-                      "cupon_vigente_pct", "duracion_modificada", "tir_tea_mid", "tir_tna_mid"]
-    campos_fijos = ["nombre", "isin", "codigo", "spread_bid_offer_bps", "clean_mid", "dirty_mid", "paridad",
-                     "dias_vto", "maturity", "cupon_vigente_pct", "duracion_modificada", "tir_tea_mid", "tir_tna_mid"]
-    if modo_mesa == "Precio":
-        disabled_cols = campos_fijos + ["yield_bid", "yield_offer"]
-    else:
-        disabled_cols = campos_fijos + ["px_bid", "px_offer"]
+    columnas_orden = ["nombre", "isin", "codigo", "precio_clean", "precio_dirty", "tea", "tna_semianual",
+                      "paridad", "dias_vto", "maturity", "cupon_vigente_pct", "duracion_modificada"]
+    campos_fijos = ["nombre", "isin", "codigo", "paridad", "dias_vto", "maturity",
+                     "cupon_vigente_pct", "duracion_modificada"]
 
     nombres_orden_mesa = monitor_universe["nombre"].tolist()
-    mesa_editor_key = f"tabla_editor_ar_{modo_mesa}_{convencion_mesa}"
+    mesa_editor_key = "tabla_editor_ar"
 
     def _mesa_on_edit():
-        estado = st.session_state.get(mesa_editor_key, {})
-        for idx, cambios in estado.get("edited_rows", {}).items():
+        estado_widget = st.session_state.get(mesa_editor_key, {})
+        for idx, cambios in estado_widget.get("edited_rows", {}).items():
             n = nombres_orden_mesa[idx]
             bono_row = registry[registry["nombre"] == n].iloc[0]
             b = make_bond(bono_row)
-            dirty_por_default = _es_dirty_por_default(bono_row["categoria"])
-            if modo_mesa == "Precio":
-                if "px_bid" in cambios:
-                    valor_in = float(cambios["px_bid"])
-                    clean_bid = (
-                        valor_in - b.accrued_interest(mesa_settlement) if dirty_por_default
-                        else clean_mercado_a_original(b, valor_in, mesa_settlement)
-                    )
-                    st.session_state[px_bid_key][n] = clean_bid
-                    st.session_state[yld_bid_key][n] = b.yield_from_clean_price(clean_bid, mesa_settlement)
-                if "px_offer" in cambios:
-                    valor_in = float(cambios["px_offer"])
-                    clean_offer = (
-                        valor_in - b.accrued_interest(mesa_settlement) if dirty_por_default
-                        else clean_mercado_a_original(b, valor_in, mesa_settlement)
-                    )
-                    st.session_state[px_offer_key][n] = clean_offer
-                    st.session_state[yld_offer_key][n] = b.yield_from_clean_price(clean_offer, mesa_settlement)
+            # Si en la misma edición cambió más de un campo (raro, pero
+            # puede pasar con un paste multi-celda), se prioriza en este
+            # orden: precio Clean > precio Dirty > TEA > TNA Semianual.
+            if "precio_clean" in cambios:
+                clean_original = clean_mercado_a_original(b, float(cambios["precio_clean"]), mesa_settlement)
+            elif "precio_dirty" in cambios:
+                clean_original = float(cambios["precio_dirty"]) - b.accrued_interest(mesa_settlement)
+            elif "tea" in cambios:
+                clean_original = b.clean_price(float(cambios["tea"]), mesa_settlement)
+            elif "tna_semianual" in cambios:
+                clean_original = b.clean_price(tna_a_tea(float(cambios["tna_semianual"])), mesa_settlement)
             else:
-                def _a_tea(valor_in):
-                    if convencion_mesa == "TNA Semianual":
-                        return tna_a_tea(valor_in)
-                    return valor_in
-
-                if "yield_bid" in cambios:
-                    yield_bid_tea = _a_tea(float(cambios["yield_bid"]))
-                    st.session_state[yld_bid_key][n] = yield_bid_tea
-                    st.session_state[px_bid_key][n] = b.clean_price(yield_bid_tea, mesa_settlement)
-                if "yield_offer" in cambios:
-                    yield_offer_tea = _a_tea(float(cambios["yield_offer"]))
-                    st.session_state[yld_offer_key][n] = yield_offer_tea
-                    st.session_state[px_offer_key][n] = b.clean_price(yield_offer_tea, mesa_settlement)
+                continue
+            st.session_state[clean_key][n] = clean_original
 
     st.data_editor(
         tabla_df[columnas_orden],
         use_container_width=True,
         hide_index=True,
-        disabled=disabled_cols,
+        disabled=campos_fijos,
         column_config={
             "nombre": st.column_config.TextColumn("NOMBRE"),
             "isin": st.column_config.TextColumn("ISIN"),
             "codigo": st.column_config.TextColumn("CÓDIGO"),
-            "yield_bid": st.column_config.NumberColumn(f"YIELD BID {convencion_mesa} %", format=f"%.{DEC}f"),
-            "yield_offer": st.column_config.NumberColumn(f"YIELD OFFER {convencion_mesa} %", format=f"%.{DEC}f"),
-            "px_bid": st.column_config.NumberColumn("PX BID", format=f"%.{DEC}f"),
-            "px_offer": st.column_config.NumberColumn("PX OFFER", format=f"%.{DEC}f"),
-            "spread_bid_offer_bps": st.column_config.TextColumn("SPREAD B/O (BPS)"),
-            "clean_mid": st.column_config.TextColumn("CLEAN (MID)"),
-            "dirty_mid": st.column_config.TextColumn("DIRTY (MID)"),
+            "precio_clean": st.column_config.NumberColumn("PRECIO CLEAN", format=f"%.{DEC}f"),
+            "precio_dirty": st.column_config.NumberColumn("PRECIO DIRTY", format=f"%.{DEC}f"),
+            "tea": st.column_config.NumberColumn("TEA %", format=f"%.{DEC}f"),
+            "tna_semianual": st.column_config.NumberColumn("TNA SEMIANUAL %", format=f"%.{DEC}f"),
             "paridad": st.column_config.TextColumn("PARIDAD"),
             "dias_vto": st.column_config.TextColumn("DAYS"),
             "maturity": st.column_config.DateColumn("VENCIMIENTO"),
             "cupon_vigente_pct": st.column_config.TextColumn("CUPÓN VIGENTE %"),
             "duracion_modificada": st.column_config.TextColumn("MOD. DURATION"),
-            "tir_tea_mid": st.column_config.TextColumn("TIR TEA (MID)"),
-            "tir_tna_mid": st.column_config.TextColumn("TIR TNA SEMIANUAL (MID)"),
         },
         key=mesa_editor_key,
         on_change=_mesa_on_edit,
@@ -814,23 +753,33 @@ with tab_fras:
     curva["dias_vto"] = curva["maturity"].apply(lambda m: (m - hoy).days)
     curva = curva.sort_values("dias_vto").reset_index(drop=True)
 
-    fras_yield_key = f"fras_yield_{fra_key_suffix}"
-    st.session_state.setdefault(fras_yield_key, {})
-    for n in curva["nombre"]:
-        if n not in st.session_state[fras_yield_key]:
-            st.session_state[fras_yield_key][n] = cargar_ultimo_yield(n)
+    fras_clean_key = f"fras_clean_{fra_key_suffix}"
+    st.session_state.setdefault(fras_clean_key, {})
+    bonos_por_nombre = {row["nombre"]: row for _, row in curva.iterrows()}
+    for n, row in bonos_por_nombre.items():
+        if n not in st.session_state[fras_clean_key]:
+            b_seed = make_bond(row)
+            tea_seed = cargar_ultimo_yield(n)
+            st.session_state[fras_clean_key][n] = b_seed.clean_price(tea_seed, hoy)
 
-    st.markdown("#### Yields spot (a vencimiento)")
+    st.markdown("#### Precios/yields spot (a vencimiento)")
+    st.caption("Editá cualquiera de las cuatro columnas - las otras tres se recalculan solas.")
+    estados_fras = {}
     input_rows = []
     for _, row in curva.iterrows():
         n = row["nombre"]
         dias = int(row["dias_vto"])
-        yld_tea = st.session_state[fras_yield_key][n]
+        b = make_bond(row)
+        clean_original = st.session_state[fras_clean_key][n]
+        estado = resolver_desde_clean(b, clean_original, hoy)
+        estados_fras[n] = estado
         input_rows.append({
             "bono": n,
             "dias_vto": fmt_es(dias, decimales=0),
-            "tea": round(yld_tea, DEC),
-            "tna_semianual": round(tea_a_tna(yld_tea), DEC),
+            "precio_clean": round(estado["clean_mercado"], DEC),
+            "precio_dirty": round(estado["dirty"], DEC),
+            "tea": round(estado["tea"], DEC),
+            "tna_semianual": round(tea_a_tna(estado["tea"]), DEC),
         })
     input_df = pd.DataFrame(input_rows)
 
@@ -838,20 +787,34 @@ with tab_fras:
     fras_editor_key = f"fras_editor_{fra_key_suffix}"
 
     def _fras_on_edit():
-        estado = st.session_state.get(fras_editor_key, {})
-        for idx, cambios in estado.get("edited_rows", {}).items():
-            if "tea" in cambios:
-                n = nombres_orden_fras[idx]
-                st.session_state[fras_yield_key][n] = float(cambios["tea"])
+        estado_widget = st.session_state.get(fras_editor_key, {})
+        for idx, cambios in estado_widget.get("edited_rows", {}).items():
+            n = nombres_orden_fras[idx]
+            b = make_bond(bonos_por_nombre[n])
+            # Prioridad si se editó más de un campo a la vez: precio Clean
+            # > precio Dirty > TEA > TNA Semianual (ver Monitor de bonos).
+            if "precio_clean" in cambios:
+                clean_original = clean_mercado_a_original(b, float(cambios["precio_clean"]), hoy)
+            elif "precio_dirty" in cambios:
+                clean_original = float(cambios["precio_dirty"]) - b.accrued_interest(hoy)
+            elif "tea" in cambios:
+                clean_original = b.clean_price(float(cambios["tea"]), hoy)
+            elif "tna_semianual" in cambios:
+                clean_original = b.clean_price(tna_a_tea(float(cambios["tna_semianual"])), hoy)
+            else:
+                continue
+            st.session_state[fras_clean_key][n] = clean_original
 
     st.data_editor(
         input_df,
         use_container_width=True,
         hide_index=True,
-        disabled=["bono", "dias_vto", "tna_semianual"],
+        disabled=["bono", "dias_vto"],
         column_config={
             "bono": st.column_config.TextColumn("BONO"),
             "dias_vto": st.column_config.TextColumn("DÍAS AL VTO"),
+            "precio_clean": st.column_config.NumberColumn("PRECIO CLEAN", format=f"%.{DEC}f"),
+            "precio_dirty": st.column_config.NumberColumn("PRECIO DIRTY", format=f"%.{DEC}f"),
             "tea": st.column_config.NumberColumn("TEA %", format=f"%.{DEC}f"),
             "tna_semianual": st.column_config.NumberColumn("TNA SEMIANUAL %", format=f"%.{DEC}f"),
         },
@@ -864,7 +827,7 @@ with tab_fras:
     dias_por_bono = {n: int(curva[curva["nombre"] == n]["dias_vto"].iloc[0]) for n in nombres}
     anios_al_vto = {n: dias_por_bono[n] / 365 for n in nombres}
 
-    yield_tea = {n: st.session_state[fras_yield_key][n] for n in nombres}
+    yield_tea = {n: estados_fras[n]["tea"] for n in nombres}
     yield_tna = {n: tea_a_tna(yield_tea[n]) for n in nombres}
 
     etiquetas = [codigos[n] for n in nombres]
