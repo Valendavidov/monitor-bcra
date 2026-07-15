@@ -2,6 +2,7 @@ nombre,isin,codigo,categoria,maturity,face,freq,coupon_anchor
 Argentina Bonar 2027 (AO27),AR0676997536,AO27,Bonar,2027-10-29,100.0,12,
 Argentina Bonar 2028 (AO28),AR0474258297,AO28,Bonar,2028-10-31,100.0,12,
 Argentina Bonar 2029 (AN29),AR0963787574,AN29,Bonar,2029-11-30,100.0,2,
+Argentina Bonar 2029 (AO29),,AO29,Bonar,2029-10-31,100.0,12,
 Argentina Bonar 2029 (AL29),ARARGE3209Y4,AL29,Bonar,2029-07-10,100.0,2,2029-07-09
 Argentina Bonar 2030 (AL30),ARARGE3209S6,AL30,Bonar,2030-07-09,100.0,2,
 Argentina Bonar 2035 (AL35),ARARGE3209T4,AL35,Bonar,2035-07-09,100.0,2,

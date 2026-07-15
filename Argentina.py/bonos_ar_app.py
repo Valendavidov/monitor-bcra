@@ -56,6 +56,7 @@ REGISTRY_PATH = os.path.join(BASE_DIR, "bonos_universo_ar.csv")
 CUPONES_PATH = os.path.join(BASE_DIR, "bonos_cupones_ar.csv")
 AMORTIZACION_PATH = os.path.join(BASE_DIR, "bonos_amortizacion_ar.csv")
 PUTS_PATH = os.path.join(BASE_DIR, "bonos_puts_ar.csv")
+FECHAS_CUPON_PATH = os.path.join(BASE_DIR, "bonos_fechas_cupon_ar.csv")
 
 
 # =============================================================================
@@ -253,9 +254,27 @@ def load_puts() -> dict:
     return ventanas
 
 
+def load_fechas_cupon_explicitas() -> dict:
+    """Lee bonos_fechas_cupon_ar.csv y arma {nombre: [fecha, ...]} - el
+    cronograma de cupones EXACTO (incluida la fecha de emisión y el
+    vencimiento) para bonos cuyo "fin de mes ajustado a día hábil" no se
+    puede reconstruir bien con add_months (ver coupon_dates_explicit en
+    bond_model_ar.py). Bonos que no aparecen (la mayoría) siguen usando
+    el cronograma automático de siempre."""
+    if not os.path.exists(FECHAS_CUPON_PATH):
+        return {}
+    df = pd.read_csv(FECHAS_CUPON_PATH)
+    df["fecha"] = pd.to_datetime(df["fecha"]).dt.date
+    fechas: dict = {}
+    for _, row in df.iterrows():
+        fechas.setdefault(row["nombre"], []).append(row["fecha"])
+    return fechas
+
+
 CUPONES = load_cupones()
 AMORTIZACION = load_amortizacion()
 PUTS_VENTANAS = load_puts()
+FECHAS_CUPON = load_fechas_cupon_explicitas()
 
 
 def make_bond(row: pd.Series) -> Bond:
@@ -274,6 +293,7 @@ def make_bond(row: pd.Series) -> Bond:
         face=float(row["face"]),
         freq=int(row["freq"]),
         coupon_anchor=coupon_anchor,
+        coupon_dates_explicit=FECHAS_CUPON.get(row["nombre"]),
         amortization=AMORTIZACION.get(row["nombre"], []),
         puts=puts_generico,
     )

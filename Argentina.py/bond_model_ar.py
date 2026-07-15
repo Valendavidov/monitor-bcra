@@ -113,14 +113,24 @@ class Bond:
             el 9-ene/9-jul, vencimiento final el 11-ene) - el vencimiento
             "real" a veces corre uno o dos dias respecto del patron regular
             de pagos. Si es None (el caso normal), se usa `maturity` como
-            ancla de todo el cronograma, sin diferencia.
-    """
+            ancla de todo el cronograma, sin diferencia. Se ignora si
+            `coupon_dates_explicit` esta cargado.
+        coupon_dates_explicit: lista opcional de fechas de cupon EXACTAS
+            (incluida la fecha de emision, como primer elemento, y el
+            vencimiento, como ultimo), que reemplaza por completo el
+            calculo via `coupon_anchor`/`add_months`. Pensado para bonos
+            con cronograma "fin de mes ajustado a dia habil" (AO27/AO28/
+            AO29) - en vez de aproximar esas fechas con add_months, se
+            cargan tal cual las publica la resolucion de emision. Si es
+            None (el caso normal), el cronograma se genera automaticamente
+            (ver coupon_dates())."""
 
     coupon_schedule: list
     maturity: date
     face: float = 100.0
     freq: int = 2
     coupon_anchor: date = None
+    coupon_dates_explicit: list = None
     amortization: list = field(default_factory=list)
     puts: list = field(default_factory=list)
 
@@ -148,12 +158,13 @@ class Bond:
         return self.face * (1 - pagado)
 
     def coupon_dates(self, settlement: date) -> list:
-        """Reconstruye el calendario de pagos de cupon retrocediendo desde
-        el ancla del cronograma (`coupon_anchor`, o `maturity` si no hay
-        uno distinto) en multiplos de `12/freq` meses, y usa `maturity`
-        como la fecha REAL del ultimo flujo. Devuelve la lista ordenada
-        cronologicamente: [cupon anterior al settlement, ...cupones
-        futuros..., vencimiento].
+        """Reconstruye el calendario de pagos de cupon. Si `coupon_dates_explicit`
+        esta cargado, se usa tal cual (ver docstring de la clase) - solo se
+        recorta a [cupon/emision anterior al settlement, ...cupones
+        futuros..., vencimiento]. Si no, se retrocede desde el ancla del
+        cronograma (`coupon_anchor`, o `maturity` si no hay uno distinto)
+        en multiplos de `12/freq` meses, y se usa `maturity` como la fecha
+        REAL del ultimo flujo.
 
         OJO 1: las fechas intermedias se calculan SIEMPRE a partir del
         ancla (nunca de la fecha anterior ya calculada) - importante para
@@ -168,6 +179,13 @@ class Bond:
         redundante con el vencimiento real, a un dia o dos de distancia) -
         por eso el loop empieza en k=1 (un periodo ANTES del ancla), no en
         k=0."""
+        if self.coupon_dates_explicit:
+            todas = sorted(self.coupon_dates_explicit)
+            anteriores = [d for d in todas if d <= settlement]
+            futuras = [d for d in todas if d > settlement]
+            prev_coupon = anteriores[-1] if anteriores else todas[0]
+            return [prev_coupon] + futuras
+
         step = 12 // self.freq
         ancla = self.coupon_anchor or self.maturity
         dates = [self.maturity]
