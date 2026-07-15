@@ -237,7 +237,6 @@ class Bond:
         el docstring del modulo).
         """
         prev_coupon, _, future, _, _, f = self.schedule(settlement)
-        step_months = 12 // self.freq
         period_nominal = 360 / self.freq
 
         outstanding = self._outstanding_at(prev_coupon)
@@ -245,9 +244,16 @@ class Bond:
         last_date, last_t = prev_coupon, f - 1
         for i, d in enumerate(future):
             t = f + i
-            period_start = add_months(d, -step_months)
-            rate = self.coupon_rate_at(period_start)
-            coupon_amt = rate / 100 / self.freq * outstanding
+            # El cupon de CADA periodo es proporcional a sus dias reales
+            # (30/360) entre el flujo anterior y este - NO un monto fijo
+            # tasa/freq. Para un periodo "regular" (ej. 30 dias en un
+            # bono mensual, 180 en uno semestral) da exactamente lo mismo,
+            # pero en bonos con fechas de fin de mes ajustadas a dia habil
+            # (AO27/AO28/AO29) los periodos varian (29, 27, 35 dias...) y
+            # el cupon tiene que variar con ellos.
+            dias_periodo = days_30_360(last_date, d)
+            rate = self.coupon_rate_at(last_date)
+            coupon_amt = rate / 100 * outstanding * dias_periodo / 360
 
             if put_date is not None and put_date < d:
                 # El put cae DENTRO de este periodo (antes del proximo
@@ -256,7 +262,7 @@ class Bond:
                 # ESTE periodo.
                 stub_days = days_30_360(last_date, put_date)
                 t_put = last_t + stub_days / period_nominal
-                cupon_corrido = coupon_amt * stub_days / period_nominal
+                cupon_corrido = rate / 100 * outstanding * stub_days / 360
                 monto_put = outstanding * put_price_pct / 100
                 rows.append({
                     "fecha": put_date,
@@ -318,12 +324,14 @@ class Bond:
         """Interes corrido: la parte del cupon actual ya devengada pero
         todavia no pagada. Usa la tasa de cupon vigente en el inicio del
         periodo actual (soporta step-up) y el capital vigente en ese
-        momento (soporta amortizacion)."""
-        prev_coupon, _, _, period_days, accrued_days, _ = self.schedule(settlement)
+        momento (soporta amortizacion). Se calcula directo por dias
+        corridos (30/360) sobre 360 - NO tasa/freq*(dias/periodo) - para
+        que de lo mismo sin importar si el periodo del bono es "regular"
+        o no (ver el mismo comentario en cashflows())."""
+        prev_coupon, _, _, _, accrued_days, _ = self.schedule(settlement)
         rate = self.coupon_rate_at(prev_coupon)
         outstanding = self._outstanding_at(prev_coupon)
-        coupon_amt = rate / 100 / self.freq * outstanding
-        return coupon_amt * accrued_days / period_days
+        return rate / 100 * outstanding * accrued_days / 360
 
     def dirty_price(self, tea_pct: float, settlement: date, put_date: date = None,
                      put_price_pct: float = None) -> float:
