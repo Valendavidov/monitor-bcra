@@ -529,7 +529,24 @@ def mapear_ticker_bevsa(descripcion: str, registry_uy: pd.DataFrame, formato: st
     los cruza contra bonos_universo_uy.csv (coincidencia exacta de mes,
     año y cupon). Devuelve el "nombre" interno del bono, o None si no
     encuentra un match (en ese caso la fila se muestra igual, con la
-    descripcion cruda en vez de un ticker - ver parsear_bevsa)."""
+    descripcion cruda en vez de un ticker - ver parsear_bevsa).
+
+    Los bonos UI vienen con una descripcion distinta, SIN cupon (ej.
+    "GLOBAL 05/45 EN PESOS(UI)") - para esos alcanza con cruzar mes/año
+    contra el universo UI, sin comparar cupon (no está en el texto)."""
+    if "(UI)" in descripcion.upper():
+        m_ui = re.search(r"(\d{1,2})/(\d{2})", descripcion)
+        if not m_ui:
+            return None
+        mes, anio_corto = int(m_ui.group(1)), int(m_ui.group(2))
+        anio = 2000 + anio_corto
+        match_ui = registry_uy[
+            (registry_uy["categoria"] == "UI")
+            & (registry_uy["maturity"].apply(lambda d: d.month) == mes)
+            & (registry_uy["maturity"].apply(lambda d: d.year) == anio)
+        ]
+        return match_ui.iloc[0]["nombre"] if not match_ui.empty else None
+
     m = re.search(r"(\d{1,2})/(\d{2})\s+([\d,.]+)\s*%", descripcion)
     if not m:
         return None
@@ -567,18 +584,20 @@ def mapear_ticker_externas(descripcion: str, registry_uy: pd.DataFrame):
 def parsear_bevsa(texto: str, registry_uy: pd.DataFrame, formato: str = "es") -> pd.DataFrame:
     """Parsea el reporte de BEVSA pegado a mano. Se queda solo con las
     filas de BONOS (cualquier fila cuyo instrumento no empiece con "BONO"
-    se descarta - eso ya excluye el titulo, el encabezado, las LETRAS R.
-    MONETARIA, las NOTAS DE T. y la fila de TOTAL, todas de un saque).
-    `formato` ("es"/"us") indica como vienen escritos los numeros - ver
-    _num_es().  Devuelve nombre_bono/nominales/usd/px/entidad/settlement
-    por fila."""
+    NI contenga "(UI)" se descarta - eso ya excluye el titulo, el
+    encabezado, las LETRAS R. MONETARIA, las NOTAS DE T. y la fila de
+    TOTAL, todas de un saque). Los bonos UI vienen etiquetados distinto
+    (ej. "GLOBAL 05/45 EN PESOS(UI)", sin empezar con "BONO"), por eso el
+    "NI contenga (UI)". `formato` ("es"/"us") indica como vienen escritos
+    los numeros - ver _num_es().  Devuelve nombre_bono/nominales/usd/px/
+    entidad/settlement por fila."""
     filas = []
     for linea in texto.splitlines():
         celdas = _dividir_fila_pegada(linea)
         if len(celdas) < 10:
             continue
         instrumento = celdas[0]
-        if not instrumento.upper().startswith("BONO"):
+        if not instrumento.upper().startswith("BONO") and "(UI)" not in instrumento.upper():
             continue
         ticker = mapear_ticker_bevsa(instrumento, registry_uy, formato)
         filas.append({
