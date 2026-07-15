@@ -712,6 +712,66 @@ with tab_yas:
                 st.markdown('<div class="yas-label">ESCENARIO</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="yas-value">Put {put_date}</div>', unsafe_allow_html=True)
 
+    st.divider()
+    st.markdown("#### Conversión USD/ARS")
+    st.caption(
+        "Ingresá nominales (valor nominal en USD) o un monto en ARS, más el tipo de cambio, "
+        "y se calcula lo que falta (incluido el equivalente en USD)."
+    )
+
+    # precio_dirty (summary) esta cotizado en USD por cada 100 de face
+    # original - "Nominales" es cuanto valor nominal en USD tenes o
+    # queres comprar (ej. 10.000 = USD 10.000 de nominal, no 10.000 bonos).
+    modo_fx = st.radio(
+        "Ingresar por", ["Nominales", "Monto en ARS"], horizontal=True, key="yas_fx_modo",
+    )
+
+    col_fx1, col_fx2 = st.columns(2)
+    with col_fx2:
+        tipo_cambio = st.number_input(
+            "Tipo de cambio (USD/ARS)", min_value=0.0, value=0.0, step=1.0, format="%.4f", key="yas_fx",
+        )
+
+    usd_consideracion = None
+    nominales = None
+    monto_ars = None
+
+    if modo_fx == "Nominales":
+        with col_fx1:
+            nominales = st.number_input(
+                "Nominales (valor nominal, USD)", min_value=0.0, value=100.0, step=100.0,
+                format=f"%.{DEC}f", key="yas_nominales",
+            )
+        usd_consideracion = summary["precio_dirty"] / 100 * nominales
+        if tipo_cambio > 0:
+            monto_ars = usd_consideracion * tipo_cambio
+    else:
+        with col_fx1:
+            monto_ars = st.number_input(
+                "Monto en ARS", min_value=0.0, value=0.0, step=1000.0,
+                format=f"%.{DEC}f", key="yas_monto_ars",
+            )
+        if tipo_cambio > 0:
+            usd_consideracion = monto_ars / tipo_cambio
+            nominales = usd_consideracion / (summary["precio_dirty"] / 100)
+
+    def _valor_o_guion(v):
+        return fmt_es(v) if v is not None else "—"
+
+    g_fx1, g_fx2, g_fx3 = st.columns(3)
+    with g_fx1:
+        st.markdown('<div class="yas-label">NOMINALES</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="yas-value">{_valor_o_guion(nominales)}</div>', unsafe_allow_html=True)
+    with g_fx2:
+        st.markdown('<div class="yas-label">MONTO EN ARS</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="yas-value">{_valor_o_guion(monto_ars)}</div>', unsafe_allow_html=True)
+    with g_fx3:
+        st.markdown('<div class="yas-label">USD (CONSIDERACIÓN)</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="yas-value">{_valor_o_guion(usd_consideracion)}</div>', unsafe_allow_html=True)
+
+    if tipo_cambio <= 0:
+        st.caption("Ingresá el tipo de cambio USD/ARS para completar la conversión.")
+
 
 # =============================================================================
 # TAB 3: MONITOR DE BONOS (universo + comparación bid/offer, a vencimiento)
