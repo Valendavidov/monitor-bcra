@@ -187,11 +187,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.caption("Bonares, Globales y BOPREAL — cupón fijo o escalonado, convención de días 30/360")
-st.caption(
-    "⚠️ BOPREAL: el precio de ejercicio del put se carga por defecto en 100% del capital vigente, "
-    "de referencia — en la práctica el BCRA liquida el put en pesos al tipo de cambio oficial del "
-    "día del ejercicio, no en USD reales. Editalo en la tab YAS si querés pricear otro supuesto."
-)
 
 
 # =============================================================================
