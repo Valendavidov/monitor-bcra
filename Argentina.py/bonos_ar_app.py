@@ -97,6 +97,13 @@ def fmt_es(x: float, decimales: int = DEC) -> str:
     return f"{x:,.{decimales}f}"
 
 
+def yas_metric(label: str, value) -> None:
+    """Un par label/value con la identidad visual de YAS (grilla estilo
+    Bloomberg) - reemplaza el par de st.markdown() repetido a mano."""
+    st.markdown(f'<div class="yas-label">{label}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="yas-value">{value}</div>', unsafe_allow_html=True)
+
+
 # =============================================================================
 # CONVERSIÓN ENTRE CONVENCIONES DE TASA (TEA / TNA Semianual)
 # =============================================================================
@@ -195,6 +202,7 @@ st.caption("Bonares, Globales y BOPREAL — cupón fijo o escalonado, convenció
 # 3) FUNCIONES AUXILIARES
 # =============================================================================
 
+@st.cache_data
 def load_registry() -> pd.DataFrame:
     df = pd.read_csv(REGISTRY_PATH)
     df["maturity"] = pd.to_datetime(df["maturity"]).dt.date
@@ -202,9 +210,15 @@ def load_registry() -> pd.DataFrame:
     # coupon_anchor: solo AL29/GD29/AE38/GD38 lo tienen cargado (ver
     # docstring de Bond.coupon_anchor) - el resto queda en None/NaT.
     df["coupon_anchor"] = pd.to_datetime(df["coupon_anchor"]).dt.date
+    # canje_2020: True para los Bonares/Globales de la reestructuración
+    # 2020 (tienen equivalente en la otra legislación, ej. AL30/GD30) -
+    # False para AO27/AO28/AN29/AO29 (emisiones nuevas standalone) y
+    # BOPREAL. Lo usa Análisis de Spread para armar los pares Bonar/Global.
+    df["canje_2020"] = df["canje_2020"].fillna(False).astype(bool)
     return df
 
 
+@st.cache_data
 def load_cupones() -> dict:
     """Lee bonos_cupones_ar.csv y arma {nombre: [(fecha_desde, cupon_pct), ...]},
     ordenado por fecha - un bono de cupón fijo simplemente tiene una lista
@@ -219,6 +233,7 @@ def load_cupones() -> dict:
     return cupones
 
 
+@st.cache_data
 def load_amortizacion() -> dict:
     if not os.path.exists(AMORTIZACION_PATH):
         return {}
@@ -230,6 +245,7 @@ def load_amortizacion() -> dict:
     return amort
 
 
+@st.cache_data
 def load_puts() -> dict:
     """Lee bonos_puts_ar.csv y arma {nombre: [(tipo, fecha_desde, fecha_hasta), ...]}.
     `tipo` es "bcra" o "afip"; `fecha_hasta` es None cuando la ventana no
@@ -251,6 +267,7 @@ def load_puts() -> dict:
     return ventanas
 
 
+@st.cache_data
 def load_fechas_cupon_explicitas() -> dict:
     """Lee bonos_fechas_cupon_ar.csv y arma {nombre: [fecha, ...]} - el
     cronograma de cupones EXACTO (incluida la fecha de emisión y el
@@ -278,12 +295,6 @@ def make_bond(row: pd.Series) -> Bond:
     coupon_anchor = row.get("coupon_anchor")
     if pd.isna(coupon_anchor):
         coupon_anchor = None
-    ventanas = PUTS_VENTANAS.get(row["nombre"], [])
-    # Bond.puts es solo un flag generico ("este bono tiene ALGUN put") mas
-    # la fecha mas temprana entre todas sus ventanas - el detalle de que
-    # TIPO (BCRA/AFIP) corresponde a cada fecha vive en PUTS_VENTANAS,
-    # que usa selector_escenario() directamente (ver docstring de load_puts).
-    puts_generico = [(min(v[1] for v in ventanas), 100.0)] if ventanas else []
     return Bond(
         coupon_schedule=CUPONES.get(row["nombre"], [(row["maturity"], 0.0)]),
         maturity=row["maturity"],
@@ -292,7 +303,6 @@ def make_bond(row: pd.Series) -> Bond:
         coupon_anchor=coupon_anchor,
         coupon_dates_explicit=FECHAS_CUPON.get(row["nombre"]),
         amortization=AMORTIZACION.get(row["nombre"], []),
-        puts=puts_generico,
     )
 
 
@@ -367,23 +377,17 @@ def clean_original_desde_edicion(b: Bond, cambios: dict, settlement: date):
     return None
 
 
-def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
-    categorias = ["Todas"] + sorted(df["categoria"].unique().tolist())
-    elegida = st.radio("Categoría", categorias, horizontal=True, key=key)
-    if elegida != "Todas":
-        return df[df["categoria"] == elegida]
-    return df
-
-
-def filtrar_por_categorias_multi(df: pd.DataFrame, key: str) -> pd.DataFrame:
-    """Como filtrar_por_categoria, pero con multiselect en vez de radio -
+def filtrar_por_categoria(df: pd.DataFrame, key: str, multi: bool = False) -> pd.DataFrame:
+    """Filtro de categoría reusado en las 5 tabs. Por default es un radio
+    de una sola opción (más "Todas"); con multi=True es un multiselect -
     para poder combinar categorías (ej. Bonar + Global, dejando afuera
     BOPREAL) en vez de elegir solo una a la vez o todas juntas."""
     categorias = sorted(df["categoria"].unique().tolist())
-    elegidas = st.multiselect("Categoría", categorias, default=categorias, key=key)
-    if not elegidas:
-        return df
-    return df[df["categoria"].isin(elegidas)]
+    if multi:
+        elegidas = st.multiselect("Categoría", categorias, default=categorias, key=key)
+        return df[df["categoria"].isin(elegidas)] if elegidas else df
+    elegida = st.radio("Categoría", ["Todas"] + categorias, horizontal=True, key=key)
+    return df[df["categoria"] == elegida] if elegida != "Todas" else df
 
 
 def cargar_ultimo_yield(nombre_bono: str, default: float = 10.0) -> float:
@@ -398,6 +402,11 @@ def cargar_ultimo_yield(nombre_bono: str, default: float = 10.0) -> float:
 
 
 def guardar_ultimo_yield(nombre_bono: str, tea_pct: float) -> None:
+    # Se llama en cada rerun del script mientras la tab YAS está en modo
+    # Yield (aunque la usuaria no haya tocado nada) - si el valor no
+    # cambió, no tiene sentido reescribir el JSON entero a disco de nuevo.
+    if cargar_ultimo_yield(nombre_bono) == tea_pct:
+        return
     data = {}
     if os.path.exists(LAST_YIELDS_PATH):
         try:
@@ -494,17 +503,17 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date, nombre_bon
     tipo esté habilitado para la fecha de ejecución elegida - ver
     _tipos_validos_en_fecha(). Si un bono solo tiene un tipo posible en esa
     fecha, se pricea directamente por ese (no hace falta elegir)."""
-    if not bond.puts:
+    ventanas = PUTS_VENTANAS.get(nombre_bono, [])
+    if not ventanas:
         return None, None
 
-    fecha_desde_default, precio_default = bond.puts[0]
+    fecha_desde_default = min(v[1] for v in ventanas)
     modo = st.radio(
         "Escenario", ["Vencimiento normal", "Put anticipado"], horizontal=True, key=f"{key_prefix}_escenario",
     )
     if modo == "Vencimiento normal":
         return None, None
 
-    ventanas = PUTS_VENTANAS.get(nombre_bono, [])
     descripciones = []
     for tipo, desde, hasta in sorted(ventanas, key=lambda v: v[1]):
         rango = f"{desde} a {hasta}" if hasta else f"desde {desde} (sin límite)"
@@ -548,7 +557,7 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date, nombre_bon
 
     if tipo_put == "Manual (% del capital vigente)":
         put_price_pct = st.number_input(
-            "Precio del put (% del capital vigente)", value=precio_default, step=0.5,
+            "Precio del put (% del capital vigente)", value=100.0, step=0.5,
             format=f"%.{DEC}f", key=f"{key_prefix}_put_precio",
         )
     elif tipo_put == "BCRA (Valor Técnico × A3500)":
@@ -600,6 +609,49 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date, nombre_bon
 
 
 registry = load_registry()
+# Lookup nombre -> fila, reusado en las 5 tabs en vez de repetir
+# registry[registry["nombre"] == n].iloc[0] (un filtro O(n) del DataFrame
+# completo) en cada callback/loop que necesita una fila puntual.
+registry_by_nombre = {row["nombre"]: row for _, row in registry.iterrows()}
+
+
+def sembrar_precios(universe: pd.DataFrame, state_key: str, settlement: date, tea_seed) -> None:
+    """Inicializa st.session_state[state_key] con un precio Clean
+    "original" semilla para cada bono de `universe` que todavía no tiene
+    uno guardado - mismo patrón repetido en Monitor de bonos, FRAs y
+    Análisis de Spread. `tea_seed` es una TEA fija, o una función
+    nombre->TEA (FRAs arranca del último yield tipeado en YAS en vez de
+    una TEA fija)."""
+    st.session_state.setdefault(state_key, {})
+    for n in universe["nombre"]:
+        if n not in st.session_state[state_key]:
+            b = make_bond(registry_by_nombre[n])
+            tea0 = tea_seed(n) if callable(tea_seed) else tea_seed
+            st.session_state[state_key][n] = b.clean_price(tea0, settlement)
+
+
+def hacer_on_edit_precio(editor_key: str, nombres_orden: list, state_key: str, settlement: date):
+    """Factory del callback on_change de un data_editor de precios con las
+    cuatro columnas reversibles (precio Clean/Dirty/TEA/TNA) - la forma
+    que comparten Monitor de bonos y FRAs."""
+    def _on_edit():
+        estado_widget = st.session_state.get(editor_key, {})
+        for idx, cambios in estado_widget.get("edited_rows", {}).items():
+            n = nombres_orden[idx]
+            b = make_bond(registry_by_nombre[n])
+            clean_original = clean_original_desde_edicion(b, cambios, settlement)
+            if clean_original is not None:
+                st.session_state[state_key][n] = clean_original
+    return _on_edit
+
+
+PRECIO_TASA_COLUMNS = {
+    "precio_clean": st.column_config.NumberColumn("PRECIO CLEAN", format=f"%.{DEC}f"),
+    "precio_dirty": st.column_config.NumberColumn("PRECIO DIRTY", format=f"%.{DEC}f"),
+    "tea": st.column_config.NumberColumn("TEA %", format=f"%.{DEC}f"),
+    "tna_semianual": st.column_config.NumberColumn("TNA SEMIANUAL %", format=f"%.{DEC}f"),
+}
+
 
 _nombres_tabs = ["Cashflows", "YAS", "Monitor de bonos", "FRAs", "Análisis de Spread"]
 _tabs = st.tabs(_nombres_tabs)
@@ -618,7 +670,7 @@ with tab_cashflow:
     with col_settle:
         settlement_cf = ajustar_settlement(st.date_input("Settlement", value=SETTLEMENT_DEFAULT, key="cf_settlement"))
 
-    row_cf = registry_cf[registry_cf["nombre"] == nombre_cf].iloc[0]
+    row_cf = registry_by_nombre[nombre_cf]
     bond_cf = make_bond(row_cf)
 
     put_date_cf, put_precio_cf = selector_escenario(bond_cf, "cf", settlement_cf, nombre_cf)
@@ -655,7 +707,7 @@ with tab_yas:
 
     with col_inputs:
         nombre_sel = st.selectbox("Bono", registry_yas["nombre"].tolist(), key="yas_bono")
-        row_sel = registry_yas[registry_yas["nombre"] == nombre_sel].iloc[0]
+        row_sel = registry_by_nombre[nombre_sel]
         bond = make_bond(row_sel)
         isin_txt = row_sel.get("isin") or "-"
         cupon_vigente_hoy = bond.coupon_rate_at(date.today())
@@ -709,36 +761,24 @@ with tab_yas:
 
     with col_grid:
         st.markdown("#### Resultado")
-        st.markdown('<div class="yas-label">ISIN</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="yas-value">{isin_txt}</div>', unsafe_allow_html=True)
+        yas_metric("ISIN", isin_txt)
         g1, g2 = st.columns(2)
         with g1:
-            st.markdown('<div class="yas-label">YIELD TEA %</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["tea_pct"])}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">YIELD TNA SEMIANUAL %</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(tea_a_tna(summary["tea_pct"]))}</div>', unsafe_allow_html=True)
+            yas_metric("YIELD TEA %", fmt_es(summary["tea_pct"]))
+            yas_metric("YIELD TNA SEMIANUAL %", fmt_es(tea_a_tna(summary["tea_pct"])))
             precio_clean_mercado = clean_original_a_mercado(bond, summary["precio_clean"], settlement)
-            st.markdown('<div class="yas-label">PRECIO CLEAN</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(precio_clean_mercado)}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">PRECIO DIRTY</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["precio_dirty"])}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">INTERÉS CORRIDO</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["interes_corrido"])}</div>', unsafe_allow_html=True)
+            yas_metric("PRECIO CLEAN", fmt_es(precio_clean_mercado))
+            yas_metric("PRECIO DIRTY", fmt_es(summary["precio_dirty"]))
+            yas_metric("INTERÉS CORRIDO", fmt_es(summary["interes_corrido"]))
             paridad_val = bond.paridad(summary["precio_clean"], settlement)
-            st.markdown('<div class="yas-label">PARIDAD</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(paridad_val)}</div>', unsafe_allow_html=True)
+            yas_metric("PARIDAD", fmt_es(paridad_val))
         with g2:
-            st.markdown('<div class="yas-label">DURACIÓN MACAULAY (AÑOS)</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["duracion_macaulay_anios"])}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">DURACIÓN MODIFICADA</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["duracion_modificada"])}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">CONVEXIDAD</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{fmt_es(summary["convexidad"])}</div>', unsafe_allow_html=True)
-            st.markdown('<div class="yas-label">SETTLEMENT</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="yas-value">{summary["settlement"]}</div>', unsafe_allow_html=True)
+            yas_metric("DURACIÓN MACAULAY (AÑOS)", fmt_es(summary["duracion_macaulay_anios"]))
+            yas_metric("DURACIÓN MODIFICADA", fmt_es(summary["duracion_modificada"]))
+            yas_metric("CONVEXIDAD", fmt_es(summary["convexidad"]))
+            yas_metric("SETTLEMENT", summary["settlement"])
             if put_date is not None:
-                st.markdown('<div class="yas-label">ESCENARIO</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="yas-value">Put {put_date}</div>', unsafe_allow_html=True)
+                yas_metric("ESCENARIO", f"Put {put_date}")
 
     st.divider()
     st.markdown("#### Conversión USD/ARS")
@@ -788,14 +828,11 @@ with tab_yas:
 
     g_fx1, g_fx2, g_fx3 = st.columns(3)
     with g_fx1:
-        st.markdown('<div class="yas-label">NOMINALES</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="yas-value">{_valor_o_guion(nominales)}</div>', unsafe_allow_html=True)
+        yas_metric("NOMINALES", _valor_o_guion(nominales))
     with g_fx2:
-        st.markdown('<div class="yas-label">MONTO EN ARS</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="yas-value">{_valor_o_guion(monto_ars)}</div>', unsafe_allow_html=True)
+        yas_metric("MONTO EN ARS", _valor_o_guion(monto_ars))
     with g_fx3:
-        st.markdown('<div class="yas-label">USD (CONSIDERACIÓN)</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="yas-value">{_valor_o_guion(usd_consideracion)}</div>', unsafe_allow_html=True)
+        yas_metric("USD (CONSIDERACIÓN)", _valor_o_guion(usd_consideracion))
 
     if tipo_cambio <= 0:
         st.caption("Ingresá el tipo de cambio USD/ARS para completar la conversión.")
@@ -812,7 +849,7 @@ with tab_monitor:
         "BOPREAL) — para pricear un escenario de put puntual usá la tab YAS."
     )
 
-    monitor_universe = filtrar_por_categorias_multi(registry, key="cat_monitor")
+    monitor_universe = filtrar_por_categoria(registry, key="cat_monitor", multi=True)
 
     clean_key = "mesa_clean_original_ar"
     st.session_state.setdefault(clean_key, {})
@@ -821,20 +858,15 @@ with tab_monitor:
         st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="mesa_settlement")
     )
 
-    for n in monitor_universe["nombre"]:
-        if n not in st.session_state[clean_key]:
-            bono_seed = monitor_universe[monitor_universe["nombre"] == n].iloc[0]
-            b_seed = make_bond(bono_seed)
-            # Semilla: TEA 10% de referencia, guardada como precio Clean
-            # "original" (la unidad nativa del motor) - de ahí se derivan
-            # las cuatro columnas editables (ver resolver_desde_clean).
-            st.session_state[clean_key][n] = b_seed.clean_price(10.00, mesa_settlement)
+    # Semilla: TEA 10% de referencia, guardada como precio Clean "original"
+    # (la unidad nativa del motor) - de ahí se derivan las cuatro columnas
+    # editables (ver resolver_desde_clean).
+    sembrar_precios(monitor_universe, clean_key, mesa_settlement, tea_seed=10.00)
 
     tabla_rows = []
     for _, row in monitor_universe.iterrows():
         n = row["nombre"]
-        bono_row = registry[registry["nombre"] == n].iloc[0]
-        b = make_bond(bono_row)
+        b = make_bond(row)
         dias_vto = (row["maturity"] - mesa_settlement).days
 
         clean_original = st.session_state[clean_key][n]
@@ -866,16 +898,6 @@ with tab_monitor:
     nombres_orden_mesa = monitor_universe["nombre"].tolist()
     mesa_editor_key = "tabla_editor_ar"
 
-    def _mesa_on_edit():
-        estado_widget = st.session_state.get(mesa_editor_key, {})
-        for idx, cambios in estado_widget.get("edited_rows", {}).items():
-            n = nombres_orden_mesa[idx]
-            bono_row = registry[registry["nombre"] == n].iloc[0]
-            b = make_bond(bono_row)
-            clean_original = clean_original_desde_edicion(b, cambios, mesa_settlement)
-            if clean_original is not None:
-                st.session_state[clean_key][n] = clean_original
-
     st.data_editor(
         tabla_df[columnas_orden],
         use_container_width=True,
@@ -885,10 +907,7 @@ with tab_monitor:
             "nombre": st.column_config.TextColumn("NOMBRE"),
             "isin": st.column_config.TextColumn("ISIN"),
             "codigo": st.column_config.TextColumn("CÓDIGO"),
-            "precio_clean": st.column_config.NumberColumn("PRECIO CLEAN", format=f"%.{DEC}f"),
-            "precio_dirty": st.column_config.NumberColumn("PRECIO DIRTY", format=f"%.{DEC}f"),
-            "tea": st.column_config.NumberColumn("TEA %", format=f"%.{DEC}f"),
-            "tna_semianual": st.column_config.NumberColumn("TNA SEMIANUAL %", format=f"%.{DEC}f"),
+            **PRECIO_TASA_COLUMNS,
             "paridad": st.column_config.TextColumn("PARIDAD"),
             "dias_vto": st.column_config.TextColumn("DAYS"),
             "maturity": st.column_config.DateColumn("VENCIMIENTO"),
@@ -896,7 +915,7 @@ with tab_monitor:
             "duracion_modificada": st.column_config.TextColumn("MOD. DURATION"),
         },
         key=mesa_editor_key,
-        on_change=_mesa_on_edit,
+        on_change=hacer_on_edit_precio(mesa_editor_key, nombres_orden_mesa, clean_key, mesa_settlement),
     )
 
 
@@ -917,13 +936,9 @@ with tab_fras:
     curva = curva.sort_values("dias_vto").reset_index(drop=True)
 
     fras_clean_key = f"fras_clean_{fra_key_suffix}"
-    st.session_state.setdefault(fras_clean_key, {})
-    bonos_por_nombre = {row["nombre"]: row for _, row in curva.iterrows()}
-    for n, row in bonos_por_nombre.items():
-        if n not in st.session_state[fras_clean_key]:
-            b_seed = make_bond(row)
-            tea_seed = cargar_ultimo_yield(n)
-            st.session_state[fras_clean_key][n] = b_seed.clean_price(tea_seed, hoy)
+    # Arranca del último yield tipeado en YAS para cada bono (mejor punto
+    # de partida que una TEA fija arbitraria).
+    sembrar_precios(curva, fras_clean_key, hoy, tea_seed=cargar_ultimo_yield)
 
     st.markdown("#### Precios/yields spot (a vencimiento)")
     st.caption("Editá cualquiera de las cuatro columnas - las otras tres se recalculan solas.")
@@ -949,15 +964,6 @@ with tab_fras:
     nombres_orden_fras = curva["nombre"].tolist()
     fras_editor_key = f"fras_editor_{fra_key_suffix}"
 
-    def _fras_on_edit():
-        estado_widget = st.session_state.get(fras_editor_key, {})
-        for idx, cambios in estado_widget.get("edited_rows", {}).items():
-            n = nombres_orden_fras[idx]
-            b = make_bond(bonos_por_nombre[n])
-            clean_original = clean_original_desde_edicion(b, cambios, hoy)
-            if clean_original is not None:
-                st.session_state[fras_clean_key][n] = clean_original
-
     st.data_editor(
         input_df,
         use_container_width=True,
@@ -966,13 +972,10 @@ with tab_fras:
         column_config={
             "bono": st.column_config.TextColumn("BONO"),
             "dias_vto": st.column_config.TextColumn("DÍAS AL VTO"),
-            "precio_clean": st.column_config.NumberColumn("PRECIO CLEAN", format=f"%.{DEC}f"),
-            "precio_dirty": st.column_config.NumberColumn("PRECIO DIRTY", format=f"%.{DEC}f"),
-            "tea": st.column_config.NumberColumn("TEA %", format=f"%.{DEC}f"),
-            "tna_semianual": st.column_config.NumberColumn("TNA SEMIANUAL %", format=f"%.{DEC}f"),
+            **PRECIO_TASA_COLUMNS,
         },
         key=fras_editor_key,
-        on_change=_fras_on_edit,
+        on_change=hacer_on_edit_precio(fras_editor_key, nombres_orden_fras, fras_clean_key, hoy),
     )
 
     nombres = nombres_orden_fras
@@ -1065,27 +1068,21 @@ with tab_spread:
         "(misma lógica de precio↔yield que Monitor de bonos)."
     )
 
-    spread_universe = filtrar_por_categorias_multi(registry, key="cat_spread")
+    spread_universe = filtrar_por_categoria(registry, key="cat_spread", multi=True)
 
     spread_settlement = ajustar_settlement(
         st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="spread_settlement")
     )
 
     spread_clean_key = "spread_clean_original_ar"
-    st.session_state.setdefault(spread_clean_key, {})
-    for n in spread_universe["nombre"]:
-        if n not in st.session_state[spread_clean_key]:
-            bono_seed = spread_universe[spread_universe["nombre"] == n].iloc[0]
-            b_seed = make_bond(bono_seed)
-            # Semilla: TEA 10% de referencia (mismo criterio que Monitor de bonos/FRAs).
-            st.session_state[spread_clean_key][n] = b_seed.clean_price(10.00, spread_settlement)
+    # Semilla: TEA 10% de referencia (mismo criterio que Monitor de bonos/FRAs).
+    sembrar_precios(spread_universe, spread_clean_key, spread_settlement, tea_seed=10.00)
 
     st.markdown("#### Precio, TEA y Modified Duration por bono")
     tabla_spread_rows = []
     for _, row in spread_universe.iterrows():
         n = row["nombre"]
-        bono_row = registry[registry["nombre"] == n].iloc[0]
-        b = make_bond(bono_row)
+        b = make_bond(row)
         clean_original = st.session_state[spread_clean_key][n]
         estado = resolver_desde_clean(b, clean_original, spread_settlement)
         mod_duration = b.duration_convexity(estado["tea"], spread_settlement)["modified_duration"]
@@ -1093,6 +1090,7 @@ with tab_spread:
             "nombre": n,
             "codigo": row.get("codigo", ""),
             "categoria": row["categoria"],
+            "canje_2020": bool(row.get("canje_2020", False)),
             "maturity": row["maturity"],
             "precio": round(estado["clean_mercado"], DEC),
             "tea": round(estado["tea"], DEC),
@@ -1109,8 +1107,7 @@ with tab_spread:
             if "precio" not in cambios:
                 continue
             n = nombres_orden_spread[idx]
-            bono_row = registry[registry["nombre"] == n].iloc[0]
-            b = make_bond(bono_row)
+            b = make_bond(registry_by_nombre[n])
             # Reusa clean_original_desde_edicion() de Monitor de bonos/FRAs -
             # acá "precio" es la misma convención que "precio_clean" ahí.
             clean_original = clean_original_desde_edicion(
@@ -1144,12 +1141,12 @@ with tab_spread:
         "(TEA Global − TEA Bonar), a partir de los precios de la tabla de arriba."
     )
 
-    # Solo los pares del canje 2020 (AL29/AL30/AL35/AE38/AL41) - AO27/AO28/
-    # AN29/AO29 son emisiones nuevas y standalone, sin equivalente Global,
-    # asi que no tiene sentido meterlas en un spread de legislacion.
-    BONOS_NUEVOS_SIN_PAR = {"AO27", "AO28", "AN29", "AO29"}
+    # Solo los pares del canje 2020 (AL29/AL30/AL35/AE38/AL41, marcados
+    # canje_2020=True en bonos_universo_ar.csv) - AO27/AO28/AN29/AO29 son
+    # emisiones nuevas y standalone, sin equivalente Global, asi que no
+    # tiene sentido meterlas en un spread de legislacion.
     bonar_df = tabla_spread_df[
-        (tabla_spread_df["categoria"] == "Bonar") & ~tabla_spread_df["codigo"].isin(BONOS_NUEVOS_SIN_PAR)
+        (tabla_spread_df["categoria"] == "Bonar") & tabla_spread_df["canje_2020"]
     ].copy()
     global_df = tabla_spread_df[tabla_spread_df["categoria"] == "Global"].copy()
     bonar_df["anio_vto"] = bonar_df["maturity"].apply(lambda m: m.year)
