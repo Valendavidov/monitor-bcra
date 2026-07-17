@@ -19,7 +19,9 @@ que tienen de particular los bonos argentinos en USD:
   (que es opción del EMISOR, como en Paraguay/Uruguay): acá el que decide
   ejercer es quien tiene el bono. Por eso NO se calcula automaticamente
   un escenario "to worst" - la app deja elegir a mano si se quiere
-  pricear a vencimiento o al put (ver `puts` y `cashflows_a_escenario`).
+  pricear a vencimiento o al put (ver `cashflows(put_date=..., ...)` acá
+  y `selector_escenario()` en bonos_ar_app.py, que maneja el detalle de
+  fechas/tipo de cada ventana de put).
 - DOS CONVENCIONES DE DIAS DISTINTAS EN EL MISMO BONO: el INTERES CORRIDO
   (accrued) se calcula con 30/360 sobre el cronograma de cupones - la
   convencion que usan los prospectos (Decreto 676/2020, SEC 424B5,
@@ -78,8 +80,14 @@ def add_months(d: date, months: int) -> date:
 @dataclass
 class Bond:
     """Representa un bono argentino en USD: cupón fijo O escalonado,
-    amortización opcional en cuotas, y puts opcionales (opción del
-    tenedor de forzar la redención anticipada).
+    amortización opcional en cuotas. Los puts de BOPREAL (opción del
+    tenedor de forzar la redención anticipada) NO viven en esta clase -
+    `cashflows()`/`clean_price()`/etc. aceptan un `put_date`/
+    `put_price_pct` puntual por llamada (un escenario a la vez, elegido
+    a mano por la usuaria - ver docstring del módulo), pero el
+    cronograma de QUÉ ventanas de put tiene cada bono y de qué tipo
+    (BCRA/AFIP) es un detalle de UI que vive en bonos_ar_app.py
+    (PUTS_VENTANAS/selector_escenario), no acá.
 
     Atributos:
         coupon_schedule: lista de (fecha_desde, tasa_anual_pct), ordenada
@@ -95,17 +103,6 @@ class Bond:
             que se repaga una fraccion del capital ORIGINAL. Vacia si el
             bono es bullet (paga el 100% del capital de una vez, al
             vencimiento).
-        puts: lista opcional de (fecha, precio_pct_del_capital_vigente) -
-            fechas desde las que el TENEDOR puede pedir la redención
-            anticipada, y a que precio (en % del capital vigente en ese
-            momento, no del face original). Vacia si el bono no tiene put.
-            OJO: el precio de ejercicio real de los puts de BOPREAL se
-            liquida en pesos al tipo de cambio oficial del dia del
-            ejercicio, no en USD "de verdad" - el 100% cargado acá es una
-            referencia (par sobre el capital vigente) para poder comparar
-            escenarios en la moneda del resto de la app (USD), no una
-            garantia de que el BCRA vaya a convalidar exactamente ese
-            precio en dólares reales ese día.
         coupon_anchor: fecha opcional que define el DIA regular del
             cronograma de cupones (mes/dia), cuando ese dia NO coincide con
             el de `maturity`. Pasa en AL29/GD29 (cupones el 9-ene/9-jul,
@@ -132,7 +129,6 @@ class Bond:
     coupon_anchor: date = None
     coupon_dates_explicit: list = None
     amortization: list = field(default_factory=list)
-    puts: list = field(default_factory=list)
 
     def coupon_rate_at(self, d: date) -> float:
         """Tasa de cupón anual (%) vigente en la fecha `d`, según el
@@ -390,15 +386,32 @@ class Bond:
         por encima del precio buscado (el yield real esta mas alla del
         techo), se duplica `hi` hasta lograr un bracket valido - antes,
         sin esto, la busqueda binaria convergia al techo (40.0) como si
-        fuera la respuesta, subestimando silenciosamente el yield real."""
+        fuera la respuesta, subestimando silenciosamente el yield real.
+
+        Los flujos (`cashflows`) y el interés corrido NO dependen de la
+        TEA que se está probando - solo las fechas/montos cambian con el
+        escenario (put_date/put_price_pct), que es fijo durante toda la
+        búsqueda. Se calculan UNA sola vez antes de los loops en vez de
+        recalcularlos (con su propio `schedule()`/`coupon_dates()`) en
+        cada una de las ~150 iteraciones."""
+        cf = self.cashflows(settlement, put_date, put_price_pct)
+        accrued = self.accrued_interest(settlement)
+        dias_actual = cf["dias_actual"]
+        flujo_total = cf["flujo_total"]
+
+        def clean_a(tea_pct: float) -> float:
+            r = tea_pct / 100
+            pv = flujo_total / (1 + r) ** (dias_actual / 365)
+            return float(pv.sum()) - accrued
+
         lo, hi = -5.0, 40.0
         for _ in range(50):
-            if self.clean_price(hi, settlement, put_date, put_price_pct) <= clean_price:
+            if clean_a(hi) <= clean_price:
                 break
             hi *= 2
         for _ in range(max_iter):
             mid = (lo + hi) / 2
-            if self.clean_price(mid, settlement, put_date, put_price_pct) > clean_price:
+            if clean_a(mid) > clean_price:
                 lo = mid
             else:
                 hi = mid
