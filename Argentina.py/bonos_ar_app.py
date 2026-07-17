@@ -339,6 +339,32 @@ def resolver_desde_tea(b: Bond, tea: float, settlement: date) -> dict:
     return resolver_desde_clean(b, clean_original, settlement)
 
 
+def clean_original_desde_edicion(b: Bond, cambios: dict, settlement: date):
+    """Usada por los callbacks on_change de Monitor de bonos y FRAs: a
+    partir del dict de columnas que efectivamente cambiaron en una fila
+    del data_editor, devuelve el precio Clean "original" correspondiente.
+    Prioridad si cambió más de un campo a la vez (raro, pero pasa con un
+    paste multi-celda): precio Clean > precio Dirty > TEA > TNA Semianual.
+    Un pegado de un bloque de celdas (ej. una tira de precios desde Excel)
+    puede traer un valor fuera de cualquier rango razonable (separador de
+    miles mal interpretado, celda corrida, etc.) que haga que el solver de
+    yield o el cálculo de duration no converjan - devuelve None en ese
+    caso (se ignora esa celda) en vez de dejar que el ValueError/
+    ArithmeticError tire abajo toda la tabla."""
+    try:
+        if "precio_clean" in cambios:
+            return clean_mercado_a_original(b, float(cambios["precio_clean"]), settlement)
+        if "precio_dirty" in cambios:
+            return float(cambios["precio_dirty"]) - b.accrued_interest(settlement)
+        if "tea" in cambios:
+            return b.clean_price(float(cambios["tea"]), settlement)
+        if "tna_semianual" in cambios:
+            return b.clean_price(tna_a_tea(float(cambios["tna_semianual"])), settlement)
+    except (ValueError, ArithmeticError):
+        return None
+    return None
+
+
 def filtrar_por_categoria(df: pd.DataFrame, key: str) -> pd.DataFrame:
     categorias = ["Todas"] + sorted(df["categoria"].unique().tolist())
     elegida = st.radio("Categoría", categorias, horizontal=True, key=key)
@@ -844,20 +870,9 @@ with tab_monitor:
             n = nombres_orden_mesa[idx]
             bono_row = registry[registry["nombre"] == n].iloc[0]
             b = make_bond(bono_row)
-            # Si en la misma edición cambió más de un campo (raro, pero
-            # puede pasar con un paste multi-celda), se prioriza en este
-            # orden: precio Clean > precio Dirty > TEA > TNA Semianual.
-            if "precio_clean" in cambios:
-                clean_original = clean_mercado_a_original(b, float(cambios["precio_clean"]), mesa_settlement)
-            elif "precio_dirty" in cambios:
-                clean_original = float(cambios["precio_dirty"]) - b.accrued_interest(mesa_settlement)
-            elif "tea" in cambios:
-                clean_original = b.clean_price(float(cambios["tea"]), mesa_settlement)
-            elif "tna_semianual" in cambios:
-                clean_original = b.clean_price(tna_a_tea(float(cambios["tna_semianual"])), mesa_settlement)
-            else:
-                continue
-            st.session_state[clean_key][n] = clean_original
+            clean_original = clean_original_desde_edicion(b, cambios, mesa_settlement)
+            if clean_original is not None:
+                st.session_state[clean_key][n] = clean_original
 
     st.data_editor(
         tabla_df[columnas_orden],
@@ -937,19 +952,9 @@ with tab_fras:
         for idx, cambios in estado_widget.get("edited_rows", {}).items():
             n = nombres_orden_fras[idx]
             b = make_bond(bonos_por_nombre[n])
-            # Prioridad si se editó más de un campo a la vez: precio Clean
-            # > precio Dirty > TEA > TNA Semianual (ver Monitor de bonos).
-            if "precio_clean" in cambios:
-                clean_original = clean_mercado_a_original(b, float(cambios["precio_clean"]), hoy)
-            elif "precio_dirty" in cambios:
-                clean_original = float(cambios["precio_dirty"]) - b.accrued_interest(hoy)
-            elif "tea" in cambios:
-                clean_original = b.clean_price(float(cambios["tea"]), hoy)
-            elif "tna_semianual" in cambios:
-                clean_original = b.clean_price(tna_a_tea(float(cambios["tna_semianual"])), hoy)
-            else:
-                continue
-            st.session_state[fras_clean_key][n] = clean_original
+            clean_original = clean_original_desde_edicion(b, cambios, hoy)
+            if clean_original is not None:
+                st.session_state[fras_clean_key][n] = clean_original
 
     st.data_editor(
         input_df,
