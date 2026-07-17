@@ -24,8 +24,8 @@ bond_model_ar.py para el detalle matematico):
       "to worst" automatico - la usuaria elige a mano si pricear a
       vencimiento o al put (ver seccion "Escenario" en Cashflows/YAS).
 
-Cuatro tabs (por ahora - Ops Historicas/NDF quedan para mas adelante si
-hace falta): Cashflows, YAS, Monitor de bonos, FRAs.
+Cinco tabs (por ahora - Ops Historicas/NDF quedan para mas adelante si
+hace falta): Cashflows, YAS, Monitor de bonos, FRAs, Analisis de Spread.
 
 Uso:
     streamlit run bonos_ar_app.py
@@ -37,7 +37,9 @@ import re
 import sys
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -599,9 +601,9 @@ def selector_escenario(bond: Bond, key_prefix: str, settlement: date, nombre_bon
 
 registry = load_registry()
 
-_nombres_tabs = ["Cashflows", "YAS", "Monitor de bonos", "FRAs"]
+_nombres_tabs = ["Cashflows", "YAS", "Monitor de bonos", "FRAs", "Análisis de Spread"]
 _tabs = st.tabs(_nombres_tabs)
-tab_cashflow, tab_yas, tab_monitor, tab_fras = _tabs
+tab_cashflow, tab_yas, tab_monitor, tab_fras, tab_spread = _tabs
 
 
 # =============================================================================
@@ -1046,3 +1048,189 @@ with tab_fras:
             "Tasa de base", list(TASAS_BASE.keys()), horizontal=True, index=1, key=f"fras_base_b_{fra_key_suffix}",
         )
         _mostrar_matriz(*armar_matriz(TASAS_BASE[base_b], forward_simple))
+
+
+# =============================================================================
+# TAB 5: Analisis de Spread
+# =============================================================================
+# Colores de legislación para el scatter y el resto de esta tab - mismo
+# orden/paleta en todos los gráficos para que "Bonar/Global/Bopreal"
+# siempre se lean con el mismo color.
+COLOR_LEGISLACION = {"Bonar": "#3987e5", "Global": "#199e70", "Bopreal": "#c98500"}
+
+with tab_spread:
+    st.subheader("Análisis de Spread")
+    st.caption(
+        "Editá el precio de cada bono - TEA y Modified Duration se recalculan solas "
+        "(misma lógica de precio↔yield que Monitor de bonos)."
+    )
+
+    spread_universe = filtrar_por_categorias_multi(registry, key="cat_spread")
+
+    spread_settlement = ajustar_settlement(
+        st.date_input("Settlement (comparación)", value=SETTLEMENT_DEFAULT, key="spread_settlement")
+    )
+
+    spread_clean_key = "spread_clean_original_ar"
+    st.session_state.setdefault(spread_clean_key, {})
+    for n in spread_universe["nombre"]:
+        if n not in st.session_state[spread_clean_key]:
+            bono_seed = spread_universe[spread_universe["nombre"] == n].iloc[0]
+            b_seed = make_bond(bono_seed)
+            # Semilla: TEA 10% de referencia (mismo criterio que Monitor de bonos/FRAs).
+            st.session_state[spread_clean_key][n] = b_seed.clean_price(10.00, spread_settlement)
+
+    st.markdown("#### Precio, TEA y Modified Duration por bono")
+    tabla_spread_rows = []
+    for _, row in spread_universe.iterrows():
+        n = row["nombre"]
+        bono_row = registry[registry["nombre"] == n].iloc[0]
+        b = make_bond(bono_row)
+        clean_original = st.session_state[spread_clean_key][n]
+        estado = resolver_desde_clean(b, clean_original, spread_settlement)
+        mod_duration = b.duration_convexity(estado["tea"], spread_settlement)["modified_duration"]
+        tabla_spread_rows.append({
+            "nombre": n,
+            "codigo": row.get("codigo", ""),
+            "categoria": row["categoria"],
+            "maturity": row["maturity"],
+            "precio": round(estado["clean_mercado"], DEC),
+            "tea": round(estado["tea"], DEC),
+            "duracion_modificada": round(mod_duration, DEC),
+        })
+    tabla_spread_df = pd.DataFrame(tabla_spread_rows)
+
+    nombres_orden_spread = spread_universe["nombre"].tolist()
+    spread_editor_key = "spread_editor_ar"
+
+    def _spread_on_edit():
+        estado_widget = st.session_state.get(spread_editor_key, {})
+        for idx, cambios in estado_widget.get("edited_rows", {}).items():
+            if "precio" not in cambios:
+                continue
+            n = nombres_orden_spread[idx]
+            bono_row = registry[registry["nombre"] == n].iloc[0]
+            b = make_bond(bono_row)
+            # Reusa clean_original_desde_edicion() de Monitor de bonos/FRAs -
+            # acá "precio" es la misma convención que "precio_clean" ahí.
+            clean_original = clean_original_desde_edicion(
+                b, {"precio_clean": cambios["precio"]}, spread_settlement
+            )
+            if clean_original is not None:
+                st.session_state[spread_clean_key][n] = clean_original
+
+    st.data_editor(
+        tabla_spread_df[["nombre", "codigo", "categoria", "maturity", "precio", "tea", "duracion_modificada"]],
+        use_container_width=True,
+        hide_index=True,
+        disabled=["nombre", "codigo", "categoria", "maturity", "tea", "duracion_modificada"],
+        column_config={
+            "nombre": st.column_config.TextColumn("NOMBRE"),
+            "codigo": st.column_config.TextColumn("CÓDIGO"),
+            "categoria": st.column_config.TextColumn("LEGISLACIÓN"),
+            "maturity": st.column_config.DateColumn("VENCIMIENTO"),
+            "precio": st.column_config.NumberColumn("PRECIO", format=f"%.{DEC}f"),
+            "tea": st.column_config.NumberColumn("TEA %", format=f"%.{DEC}f"),
+            "duracion_modificada": st.column_config.NumberColumn("MOD. DURATION", format=f"%.{DEC}f"),
+        },
+        key=spread_editor_key,
+        on_change=_spread_on_edit,
+    )
+
+    st.divider()
+    st.markdown("#### Spread de Legislación")
+    st.caption(
+        "Diferencia en bps entre Global y Bonar de igual año de vencimiento "
+        "(TEA Global − TEA Bonar), a partir de los precios de la tabla de arriba."
+    )
+
+    # Solo los pares del canje 2020 (AL29/AL30/AL35/AE38/AL41) - AO27/AO28/
+    # AN29/AO29 son emisiones nuevas y standalone, sin equivalente Global,
+    # asi que no tiene sentido meterlas en un spread de legislacion.
+    BONOS_NUEVOS_SIN_PAR = {"AO27", "AO28", "AN29", "AO29"}
+    bonar_df = tabla_spread_df[
+        (tabla_spread_df["categoria"] == "Bonar") & ~tabla_spread_df["codigo"].isin(BONOS_NUEVOS_SIN_PAR)
+    ].copy()
+    global_df = tabla_spread_df[tabla_spread_df["categoria"] == "Global"].copy()
+    bonar_df["anio_vto"] = bonar_df["maturity"].apply(lambda m: m.year)
+    global_df["anio_vto"] = global_df["maturity"].apply(lambda m: m.year)
+
+    spread_leg = bonar_df.merge(global_df, on="anio_vto", suffixes=("_bonar", "_global"))
+    if spread_leg.empty:
+        st.caption(
+            "No hay pares Bonar/Global con el mismo año de vencimiento en la selección actual "
+            "(revisá el filtro de Categoría arriba)."
+        )
+    else:
+        spread_leg["spread_bps"] = (spread_leg["tea_global"] - spread_leg["tea_bonar"]) * 100
+        spread_leg = spread_leg.sort_values("anio_vto")
+        tabla_leg = pd.DataFrame({
+            "año": spread_leg["anio_vto"],
+            "bonar": spread_leg["codigo_bonar"],
+            "global": spread_leg["codigo_global"],
+            "tea_bonar": spread_leg["tea_bonar"].round(DEC),
+            "tea_global": spread_leg["tea_global"].round(DEC),
+            "spread_bps": spread_leg["spread_bps"].round(1),
+        })
+        st.dataframe(
+            tabla_leg, use_container_width=True, hide_index=True,
+            column_config={
+                "año": st.column_config.NumberColumn("AÑO", format="%d"),
+                "bonar": st.column_config.TextColumn("BONAR"),
+                "global": st.column_config.TextColumn("GLOBAL"),
+                "tea_bonar": st.column_config.NumberColumn("TEA BONAR %", format=f"%.{DEC}f"),
+                "tea_global": st.column_config.NumberColumn("TEA GLOBAL %", format=f"%.{DEC}f"),
+                "spread_bps": st.column_config.NumberColumn("SPREAD (BPS)", format="%.1f"),
+            },
+        )
+
+    st.divider()
+    st.markdown("#### TEA vs Modified Duration")
+
+    bonos_disponibles_scatter = tabla_spread_df["nombre"].tolist()
+    bonos_scatter = st.multiselect(
+        "Bonos en el scatter", bonos_disponibles_scatter, default=bonos_disponibles_scatter,
+        key="spread_scatter_bonos",
+    )
+    scatter_df = tabla_spread_df[tabla_spread_df["nombre"].isin(bonos_scatter)]
+
+    if scatter_df.empty:
+        st.caption("Elegí al menos un bono para mostrar el scatter.")
+    else:
+        fig = go.Figure()
+        # Una serie (puntos + trendline) por legislación, siempre en el
+        # mismo orden/color - así el color identifica SIEMPRE la misma
+        # legislación sea cual sea el subconjunto de bonos elegido.
+        for categoria in ["Bonar", "Global", "Bopreal"]:
+            sub = scatter_df[scatter_df["categoria"] == categoria]
+            if sub.empty:
+                continue
+            color = COLOR_LEGISLACION[categoria]
+            fig.add_trace(go.Scatter(
+                x=sub["duracion_modificada"], y=sub["tea"], mode="markers+text",
+                text=sub["codigo"], textposition="top center",
+                name=categoria, marker=dict(size=10, color=color),
+                textfont=dict(color=color, size=11),
+            ))
+            if len(sub) >= 2:
+                # Trendline propia por legislación (regresión lineal simple,
+                # sin agregar dependencia de statsmodels) - no tiene sentido
+                # una sola recta mezclando Bonares/Globales/Bopreales.
+                coef = np.polyfit(sub["duracion_modificada"], sub["tea"], 1)
+                x_line = np.linspace(sub["duracion_modificada"].min(), sub["duracion_modificada"].max(), 50)
+                y_line = coef[0] * x_line + coef[1]
+                fig.add_trace(go.Scatter(
+                    x=x_line, y=y_line, mode="lines",
+                    name=f"Trendline {categoria}", line=dict(color=color, dash="dash", width=1.5),
+                ))
+        fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#0E1116", plot_bgcolor="#0E1116",
+            xaxis_title="Modified Duration", yaxis_title="TEA %",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(t=40, l=10, r=10, b=10),
+            height=520,
+        )
+        fig.update_xaxes(gridcolor="#262B33", zerolinecolor="#262B33")
+        fig.update_yaxes(gridcolor="#262B33", zerolinecolor="#262B33")
+        st.plotly_chart(fig, use_container_width=True)
