@@ -336,8 +336,18 @@ class Bond:
         cuando el yield sube (relacion monotona), se va acotando el
         intervalo [lo, hi] hasta que el precio que da "mid" esta lo
         bastante cerca del precio buscado.
+        El techo de 40.0 es solo el punto de partida, NO un limite real de
+        yield: si el precio a `hi` sigue por encima del precio buscado (el
+        yield real esta mas alla del techo), se duplica `hi` hasta lograr
+        un bracket valido - antes, sin esto, la busqueda binaria convergia
+        al techo (40.0) como si fuera la respuesta, subestimando
+        silenciosamente el yield real para un bono muy castigado en precio.
         """
         lo, hi = -5.0, 40.0
+        for _ in range(50):
+            if self.clean_price(hi, settlement, redemption_date, redemption_price) <= clean_price:
+                break
+            hi *= 2
         for _ in range(max_iter):
             mid = (lo + hi) / 2
             if self.clean_price(mid, settlement, redemption_date, redemption_price) > clean_price:

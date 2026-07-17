@@ -380,8 +380,22 @@ class Bond:
         """Dado un precio Clean, encuentra la TEA que lo produce (para un
         escenario dado - vencimiento normal, o un put puntual) por
         busqueda binaria: el precio cae cuando la tasa sube (relacion
-        monotona), asi que se acota el intervalo [lo, hi] hasta converger."""
+        monotona), asi que se acota el intervalo [lo, hi] hasta converger.
+
+        El techo de 40.0 es solo el punto de partida, NO un limite real de
+        TEA: un bono muy amortizado (ej. AL29, que ya devolvio 40% del
+        capital) tiene una vida promedio mucho mas corta que su plazo a
+        vencimiento, asi que a precios de descuento puede rendir bastante
+        mas de 40% TEA sin que eso sea un error. Si el precio a `hi` sigue
+        por encima del precio buscado (el yield real esta mas alla del
+        techo), se duplica `hi` hasta lograr un bracket valido - antes,
+        sin esto, la busqueda binaria convergia al techo (40.0) como si
+        fuera la respuesta, subestimando silenciosamente el yield real."""
         lo, hi = -5.0, 40.0
+        for _ in range(50):
+            if self.clean_price(hi, settlement, put_date, put_price_pct) <= clean_price:
+                break
+            hi *= 2
         for _ in range(max_iter):
             mid = (lo + hi) / 2
             if self.clean_price(mid, settlement, put_date, put_price_pct) > clean_price:
